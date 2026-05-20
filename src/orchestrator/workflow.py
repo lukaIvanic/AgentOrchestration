@@ -1,8 +1,11 @@
 """Workflow Manager — Defines and executes multi-step agent workflows."""
 
+import logging
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
 from uuid import uuid4
+
+logger = logging.getLogger(__name__)
 
 
 class StepStatus(Enum):
@@ -14,7 +17,13 @@ class StepStatus(Enum):
 
 
 class WorkflowStep:
-    def __init__(self, name: str, handler: Callable, retries: int = 0, timeout: int = 300):
+    def __init__(
+        self,
+        name: str,
+        handler: Callable,
+        retries: int = 0,
+        timeout: int = 300,
+    ):
         self.id = str(uuid4())
         self.name = name
         self.handler = handler
@@ -33,6 +42,7 @@ class Workflow:
         self.steps: List[WorkflowStep] = []
         self._step_map: Dict[str, WorkflowStep] = {}
         self.status = StepStatus.PENDING
+        self.audit_events: List[Dict[str, str]] = []
 
     def add_step(self, step: WorkflowStep) -> "Workflow":
         self.steps.append(step)
@@ -41,6 +51,50 @@ class Workflow:
 
     def get_step(self, step_id: str) -> Optional[WorkflowStep]:
         return self._step_map.get(step_id)
+
+    def apply_step_update(
+        self,
+        step_id: str,
+        status: StepStatus,
+        result: Any = None,
+        error: Optional[str] = None,
+    ) -> bool:
+        step = self.get_step(step_id)
+        if not step:
+            return False
+
+        if self.status == StepStatus.FAILED and status == StepStatus.COMPLETED:
+            self._record_rejected_transition(step_id, status)
+            return False
+
+        step.status = status
+        step.result = result
+        step.error = error
+
+        if status == StepStatus.FAILED:
+            self.status = StepStatus.FAILED
+        elif all(step.status == StepStatus.COMPLETED for step in self.steps):
+            self.status = StepStatus.COMPLETED
+
+        return True
+
+    def _record_rejected_transition(
+        self,
+        step_id: str,
+        attempted_status: StepStatus,
+    ) -> None:
+        event = {
+            "workflow_id": self.id,
+            "step_id": step_id,
+            "workflow_status": self.status.value,
+            "attempted_status": attempted_status.value,
+            "reason": "parent_workflow_failed",
+        }
+        self.audit_events.append(event)
+        logger.warning(
+            "Rejected stale child workflow transition",
+            extra=event,
+        )
 
 
 class WorkflowManager:
@@ -68,15 +122,20 @@ class WorkflowManager:
 
         workflow.status = StepStatus.RUNNING
         for step in workflow.steps:
-            step.status = StepStatus.RUNNING
+            workflow.apply_step_update(step.id, StepStatus.RUNNING)
             try:
                 result = step.handler()
-                step.result = result
-                step.status = StepStatus.COMPLETED
+                workflow.apply_step_update(
+                    step.id,
+                    StepStatus.COMPLETED,
+                    result=result,
+                )
             except Exception as e:
-                step.error = str(e)
-                step.status = StepStatus.FAILED
-                workflow.status = StepStatus.FAILED
+                workflow.apply_step_update(
+                    step.id,
+                    StepStatus.FAILED,
+                    error=str(e),
+                )
                 return False
 
         workflow.status = StepStatus.COMPLETED
