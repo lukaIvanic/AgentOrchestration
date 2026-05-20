@@ -92,8 +92,10 @@ def _validate_deploy_metrics(args) -> None:
             report = validate_metrics_schema_file(
                 _resolve_schema_path(Path(args.manifest), schema_path)
             )
-        elif manifest.get("metrics"):
-            report = validate_metrics_schema(manifest)
+        else:
+            embedded_schema = _embedded_metrics_schema(manifest)
+            if embedded_schema is not None:
+                report = validate_metrics_schema(embedded_schema)
 
     if report is None:
         return
@@ -123,6 +125,27 @@ def _resolve_schema_path(manifest_path: Path, schema_path: str) -> Path:
     if candidate.is_absolute():
         return candidate
     return manifest_path.parent / candidate
+
+
+def _embedded_metrics_schema(manifest):
+    if manifest.get("metrics"):
+        return manifest
+
+    observability = manifest.get("observability")
+    if isinstance(observability, dict) and observability.get("metrics"):
+        schema = {"metrics": observability["metrics"]}
+        if observability.get("exceptions"):
+            schema["exceptions"] = observability["exceptions"]
+        return schema
+
+    telemetry = manifest.get("telemetry")
+    if isinstance(telemetry, dict) and telemetry.get("metrics"):
+        schema = {"metrics": telemetry["metrics"]}
+        if telemetry.get("exceptions"):
+            schema["exceptions"] = telemetry["exceptions"]
+        return schema
+
+    return None
 
 
 if __name__ == "__main__":

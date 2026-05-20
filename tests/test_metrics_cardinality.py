@@ -264,3 +264,80 @@ def test_deploy_checks_metrics_embedded_in_manifest(
     cli()
 
     assert "metrics cardinality check passed" in capsys.readouterr().out
+
+
+def test_deploy_checks_observability_metrics_in_manifest(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    manifest = tmp_path / "agent.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "observability": {
+                    "metrics": [
+                        {
+                            "name": "worker_events_total",
+                            "labels": [
+                                {
+                                    "name": "worker_id",
+                                    "owner": "runtime",
+                                },
+                            ],
+                        },
+                    ],
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("sys.argv", ["ao", "deploy", str(manifest)])
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli()
+
+    assert exc_info.value.code == 2
+    assert "worker_events_total.worker_id" in capsys.readouterr().err
+
+
+def test_deploy_checks_telemetry_metrics_exceptions_in_manifest(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    manifest = tmp_path / "agent.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "telemetry": {
+                    "metrics": [
+                        {
+                            "name": "worker_events_total",
+                            "labels": [
+                                {
+                                    "name": "worker_id",
+                                    "owner": "runtime",
+                                },
+                            ],
+                        },
+                    ],
+                    "exceptions": [
+                        {
+                            "metric": "worker_events_total",
+                            "label": "worker_id",
+                            "owner": "observability",
+                            "approved_by": "sre-lead",
+                            "reason": "Bounded rollout investigation.",
+                        },
+                    ],
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("sys.argv", ["ao", "deploy", str(manifest)])
+
+    cli()
+
+    assert "metrics cardinality check passed" in capsys.readouterr().out
