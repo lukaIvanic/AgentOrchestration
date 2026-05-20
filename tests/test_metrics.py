@@ -1,4 +1,6 @@
 import pytest
+import threading
+import time
 from src.common.metrics import MetricsCollector
 
 
@@ -26,10 +28,24 @@ class TestMetricsCollector:
 
     def test_timer(self):
         self.metrics.start_timer("operation")
-        import time
         time.sleep(0.01)
         duration = self.metrics.stop_timer("operation")
         assert duration > 0.005
+
+    def test_stop_timer_records_without_deadlock(self):
+        self.metrics.start_timer("operation")
+
+        worker = threading.Thread(
+            target=self.metrics.stop_timer,
+            args=("operation",),
+            daemon=True,
+        )
+        worker.start()
+        worker.join(timeout=0.2)
+
+        assert not worker.is_alive()
+        snapshot = self.metrics.snapshot()
+        assert snapshot["histograms"]["operation"]["count"] == 1
 
 # 2019-07-16T09:29:21 update
 
