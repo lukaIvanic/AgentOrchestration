@@ -30,6 +30,8 @@ class WorkflowStep:
         self.retries = retries
         self.timeout = timeout
         self.status = StepStatus.PENDING
+        self.attempt = 1
+        self.revision = 0
         self.result: Any = None
         self.error: Optional[str] = None
 
@@ -42,7 +44,8 @@ class Workflow:
         self.steps: List[WorkflowStep] = []
         self._step_map: Dict[str, WorkflowStep] = {}
         self.status = StepStatus.PENDING
-        self.audit_events: List[Dict[str, str]] = []
+        self.revision = 0
+        self.audit_events: List[Dict[str, Any]] = []
 
     def add_step(self, step: WorkflowStep) -> "Workflow":
         self.steps.append(step)
@@ -58,18 +61,48 @@ class Workflow:
         status: StepStatus,
         result: Any = None,
         error: Optional[str] = None,
+        attempt: int = 1,
+        expected_step_revision: Optional[int] = None,
     ) -> bool:
         step = self.get_step(step_id)
         if not step:
             return False
 
+        if attempt != step.attempt:
+            self._record_rejected_transition(
+                step,
+                status,
+                "attempt_mismatch",
+                attempt,
+            )
+            return False
+
+        if (
+            expected_step_revision is not None
+            and expected_step_revision != step.revision
+        ):
+            self._record_rejected_transition(
+                step,
+                status,
+                "stale_step_revision",
+                attempt,
+            )
+            return False
+
         if self.status == StepStatus.FAILED and status == StepStatus.COMPLETED:
-            self._record_rejected_transition(step_id, status)
+            self._record_rejected_transition(
+                step,
+                status,
+                "parent_workflow_failed",
+                attempt,
+            )
             return False
 
         step.status = status
         step.result = result
         step.error = error
+        step.revision += 1
+        self.revision += 1
 
         if status == StepStatus.FAILED:
             self.status = StepStatus.FAILED
@@ -80,15 +113,20 @@ class Workflow:
 
     def _record_rejected_transition(
         self,
-        step_id: str,
+        step: WorkflowStep,
         attempted_status: StepStatus,
+        reason: str,
+        attempt: int,
     ) -> None:
         event = {
             "workflow_id": self.id,
-            "step_id": step_id,
+            "step_id": step.id,
+            "step_revision": step.revision,
+            "attempt": attempt,
             "workflow_status": self.status.value,
+            "workflow_revision": self.revision,
             "attempted_status": attempted_status.value,
-            "reason": "parent_workflow_failed",
+            "reason": reason,
         }
         self.audit_events.append(event)
         logger.warning(
