@@ -116,6 +116,40 @@ def build_release_summary(
     return "\n".join(lines)
 
 
+def build_validated_manifest(
+    validated_entries: Iterable[Mapping[str, Any]]
+) -> Dict[str, Any]:
+    """Build the manifest-push input from validated architecture digests."""
+
+    images = []
+    for entry in sorted(
+        validated_entries,
+        key=lambda item: str(item["architecture"]),
+    ):
+        images.append(
+            {
+                "architecture": str(entry["architecture"]),
+                "digest": str(entry["digest"]),
+            }
+        )
+    return {"images": images}
+
+
+def write_validated_manifest(
+    validated_entries: Iterable[Mapping[str, Any]],
+    output_path: str,
+) -> None:
+    """Write only validated architecture digests for manifest publication."""
+
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(build_validated_manifest(validated_entries), indent=2)
+        + "\n",
+        encoding="utf8",
+    )
+
+
 def _extract_entries(manifest: Mapping[str, Any]) -> Sequence[Any]:
     entries = manifest.get("architectures")
     if entries is None:
