@@ -44,17 +44,55 @@ class QuarantinedArtifactError(Exception):
 
 
 class QuarantineStore:
-    def __init__(self):
+    def __init__(self, marker_dir: Optional[Path] = None):
         self._quarantined: Dict[Path, IntegrityAlert] = {}
+        self.marker_dir = Path(marker_dir) if marker_dir is not None else None
 
     def quarantine(self, blob_path: Path, alert: IntegrityAlert) -> None:
-        self._quarantined[blob_path.resolve()] = alert
+        resolved_path = blob_path.resolve()
+        self._quarantined[resolved_path] = alert
+        marker_path = self._marker_path(resolved_path)
+        if marker_path is not None:
+            marker_path.parent.mkdir(parents=True, exist_ok=True)
+            marker_path.write_text(
+                json.dumps(alert.as_dict(), sort_keys=True),
+                encoding="utf-8",
+            )
 
     def is_quarantined(self, blob_path: Path) -> bool:
-        return blob_path.resolve() in self._quarantined
+        resolved_path = blob_path.resolve()
+        if resolved_path in self._quarantined:
+            return True
+        marker_path = self._marker_path(resolved_path)
+        return marker_path is not None and marker_path.exists()
 
     def alert_for(self, blob_path: Path) -> Optional[IntegrityAlert]:
-        return self._quarantined.get(blob_path.resolve())
+        resolved_path = blob_path.resolve()
+        alert = self._quarantined.get(resolved_path)
+        if alert is not None:
+            return alert
+
+        marker_path = self._marker_path(resolved_path)
+        if marker_path is None or not marker_path.exists():
+            return None
+
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        return IntegrityAlert(
+            artifact_id=marker["artifact_id"],
+            blob_path=marker["blob_path"],
+            expected_digest=marker["expected_digest"],
+            actual_digest=marker["actual_digest"],
+            alert_type=marker.get("alert_type", "artifact_digest_mismatch"),
+            severity=marker.get("severity", "critical"),
+        )
+
+    def _marker_path(self, blob_path: Path) -> Optional[Path]:
+        if self.marker_dir is None:
+            return None
+        marker_name = hashlib.sha256(
+            str(blob_path).encode("utf-8"),
+        ).hexdigest()
+        return self.marker_dir / f"{marker_name}.json"
 
 
 class ArtifactManifestReader:
@@ -63,10 +101,13 @@ class ArtifactManifestReader:
         root: Path,
         alert_sink: Optional[Callable[[IntegrityAlert], None]] = None,
         quarantine_store: Optional[QuarantineStore] = None,
+        quarantine_marker_dir: Optional[Path] = None,
     ):
         self.root = Path(root)
         self.alert_sink = alert_sink or (lambda alert: None)
-        self.quarantine_store = quarantine_store or QuarantineStore()
+        self.quarantine_store = quarantine_store or QuarantineStore(
+            marker_dir=quarantine_marker_dir,
+        )
 
     def read(self, manifest_path: Path) -> bytes:
         manifest_file = self._resolve_path(manifest_path)
