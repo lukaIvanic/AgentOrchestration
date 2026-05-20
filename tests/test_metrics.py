@@ -17,6 +17,25 @@ class TestMetricsCollector:
         snapshot = self.metrics.snapshot()
         assert snapshot["gauges"]["memory.usage"] == 85.5
 
+    def test_gauge_accepts_integer_values(self):
+        self.metrics.gauge("queue.depth", 12)
+        snapshot = self.metrics.snapshot()
+        assert snapshot["gauges"]["queue.depth"] == 12
+
+    def test_gauge_rejects_non_numeric_values(self):
+        with pytest.raises(TypeError, match="must be numeric"):
+            self.metrics.gauge("memory.usage", "85.5")
+
+        snapshot = self.metrics.snapshot()
+        assert "memory.usage" not in snapshot["gauges"]
+
+    def test_gauge_rejects_boolean_values(self):
+        with pytest.raises(TypeError, match="must be numeric"):
+            self.metrics.gauge("feature.enabled", True)
+
+        snapshot = self.metrics.snapshot()
+        assert "feature.enabled" not in snapshot["gauges"]
+
     def test_observe(self):
         self.metrics.observe("response.time", 0.5)
         self.metrics.observe("response.time", 1.5)
