@@ -1,4 +1,3 @@
-import pytest
 import threading
 import time
 from src.common.metrics import MetricsCollector
