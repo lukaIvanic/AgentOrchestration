@@ -25,5 +25,7 @@ jobs:
         run: uv sync
       - name: Run tests
         run: uv run pytest --cov=src tests/
+      - name: Validate sidecar runtime compose
+        run: uv run python scripts/validate_sidecar_runtime.py infra/docker-compose.yml
       - name: Lint
         run: uv run flake8 src/ tests/
