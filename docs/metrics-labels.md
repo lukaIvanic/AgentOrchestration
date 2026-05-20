@@ -1,7 +1,10 @@
 # Metrics Label Cardinality Policy
 
-Deployment must validate metric labels before rollout when a metrics schema is
-provided with `ao deploy --metrics-schema`.
+Deployment validates metric labels before rollout when either:
+
+- the manifest embeds a `metrics` schema,
+- the manifest points to a schema with `metrics_schema` / `metricsSchema`, or
+- the CLI is run with `ao deploy --metrics-schema`.
 
 ## Allowed Labels
 

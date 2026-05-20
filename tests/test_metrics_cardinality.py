@@ -194,3 +194,73 @@ def test_deploy_continues_when_metrics_schema_passes(
     output = capsys.readouterr().out
     assert "metrics cardinality check passed" in output
     assert "Deploying agent from manifest" in output
+
+
+def test_deploy_checks_metrics_schema_declared_by_manifest(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    metrics_schema = tmp_path / "metrics.json"
+    metrics_schema.write_text(
+        json.dumps(
+            {
+                "metrics": [
+                    {
+                        "name": "worker_events_total",
+                        "labels": [
+                            {
+                                "name": "worker_id",
+                                "owner": "runtime",
+                            },
+                        ],
+                    },
+                ],
+            },
+        ),
+        encoding="utf-8",
+    )
+    manifest = tmp_path / "agent.json"
+    manifest.write_text(
+        json.dumps({"metrics_schema": metrics_schema.name}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("sys.argv", ["ao", "deploy", str(manifest)])
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli()
+
+    assert exc_info.value.code == 2
+    assert "worker_events_total.worker_id" in capsys.readouterr().err
+
+
+def test_deploy_checks_metrics_embedded_in_manifest(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    manifest = tmp_path / "agent.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "metrics": [
+                    {
+                        "name": "task_events_total",
+                        "labels": [
+                            {
+                                "name": "event_type",
+                                "owner": "observability",
+                                "values": ["queued", "completed"],
+                            },
+                        ],
+                    },
+                ],
+            },
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("sys.argv", ["ao", "deploy", str(manifest)])
+
+    cli()
+
+    assert "metrics cardinality check passed" in capsys.readouterr().out

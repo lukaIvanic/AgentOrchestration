@@ -1,11 +1,15 @@
 """CLI entry point for the agent orchestrator."""
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
 from src.common.logging import configure_logging
-from src.common.metrics_cardinality import validate_metrics_schema_file
+from src.common.metrics_cardinality import (
+    validate_metrics_schema,
+    validate_metrics_schema_file,
+)
 
 
 def cli():
@@ -64,12 +68,7 @@ def cli():
     if args.command == "init":
         print(f"Initializing project: {args.name}")
     elif args.command == "deploy":
-        if args.metrics_schema:
-            report = validate_metrics_schema_file(Path(args.metrics_schema))
-            if not report.passed:
-                print(report.format(), file=sys.stderr)
-                sys.exit(2)
-            print(report.format())
+        _validate_deploy_metrics(args)
         print(f"Deploying agent from manifest: {args.manifest}")
     elif args.command == "status":
         print("Checking agent status...")
@@ -78,6 +77,52 @@ def cli():
     else:
         parser.print_help()
         sys.exit(1)
+
+
+def _validate_deploy_metrics(args) -> None:
+    report = None
+    if args.metrics_schema:
+        report = validate_metrics_schema_file(Path(args.metrics_schema))
+    else:
+        manifest = _load_manifest(Path(args.manifest))
+        schema_path = manifest.get("metrics_schema") or manifest.get(
+            "metricsSchema"
+        )
+        if schema_path:
+            report = validate_metrics_schema_file(
+                _resolve_schema_path(Path(args.manifest), schema_path)
+            )
+        elif manifest.get("metrics"):
+            report = validate_metrics_schema(manifest)
+
+    if report is None:
+        return
+
+    if not report.passed:
+        print(report.format(), file=sys.stderr)
+        sys.exit(2)
+    print(report.format())
+
+
+def _load_manifest(path: Path):
+    raw = path.read_text(encoding="utf-8")
+    if path.suffix.lower() == ".json":
+        return json.loads(raw)
+
+    try:
+        import yaml
+    except ImportError as exc:
+        raise ValueError("YAML manifests require PyYAML") from exc
+
+    manifest = yaml.safe_load(raw)
+    return manifest if isinstance(manifest, dict) else {}
+
+
+def _resolve_schema_path(manifest_path: Path, schema_path: str) -> Path:
+    candidate = Path(schema_path)
+    if candidate.is_absolute():
+        return candidate
+    return manifest_path.parent / candidate
 
 
 if __name__ == "__main__":
