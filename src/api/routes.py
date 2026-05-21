@@ -72,16 +72,26 @@ async def agent_count():
 async def list_run_events(
     run_id: str,
     tenant_id: str,
-    cursor: int = 0,
+    cursor: Optional[int] = None,
+    offset: Optional[int] = None,
     limit: int = 50,
     authorization: str = Header(default=""),
 ):
+    if cursor is not None and offset is not None and cursor != offset:
+        raise HTTPException(
+            status_code=400,
+            detail="cursor and offset must match when both are provided",
+        )
+    effective_cursor = offset if offset is not None else cursor
+    if effective_cursor is None:
+        effective_cursor = 0
+
     try:
         page = event_stream_service.list_run_events(
             authorization=authorization,
             tenant_id=tenant_id,
             run_id=run_id,
-            cursor=cursor,
+            cursor=effective_cursor,
             limit=limit,
         )
     except RunEventUnauthorizedError as exc:
@@ -98,8 +108,10 @@ async def list_run_events(
         "run_id": page.run_id,
         "tenant_id": page.tenant_id,
         "cursor": page.cursor,
+        "offset": page.cursor,
         "limit": page.limit,
         "next_cursor": page.next_cursor,
+        "next_offset": page.next_cursor,
         "events": page.events,
     }
 
