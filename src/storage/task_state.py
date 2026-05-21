@@ -165,20 +165,33 @@ class TaskStateRepository:
 
     def _assert_scoped_sql(self, sql: str) -> None:
         normalized = " ".join(sql.lower().split())
+        if "task_state" not in normalized:
+            return
+        if "insert into task_state" in normalized:
+            insert_columns = normalized.split("values", 1)[0]
+            if "workspace_id" in insert_columns:
+                return
+            raise TaskStateScopeError(
+                "task_state inserts must include workspace_id scope"
+            )
         mutates_or_reads_task_state = any(
             marker in normalized
             for marker in (
                 "from task_state",
                 "update task_state",
                 "delete from task_state",
-                "insert into task_state",
             )
         )
         if not mutates_or_reads_task_state:
             return
-        if "workspace_id" not in normalized:
+        if " where " not in normalized:
             raise TaskStateScopeError(
-                "task_state queries must include workspace_id scope"
+                "task_state queries must include workspace_id predicate"
+            )
+        predicate = normalized.rsplit(" where ", 1)[1]
+        if "workspace_id" not in predicate:
+            raise TaskStateScopeError(
+                "task_state queries must include workspace_id predicate"
             )
 
     def _require_scope(self, field: str, value: str) -> str:

@@ -2,6 +2,7 @@ import sqlite3
 
 import pytest
 
+from scripts.check_task_state_scope import unsafe_task_state_queries
 from src.storage.task_state import TaskStateRepository, TaskStateScopeError
 
 
@@ -79,5 +80,76 @@ def test_internal_guard_blocks_unscoped_task_state_predicates():
 
     with pytest.raises(TaskStateScopeError):
         repository._assert_scoped_sql(
-            "SELECT * FROM task_state WHERE task_id = ?"
+            "SELECT workspace_id, task_id "
+            "FROM task_state "
+            "WHERE task_id = ?"
         )
+
+    with pytest.raises(TaskStateScopeError):
+        repository._assert_scoped_sql(
+            "UPDATE task_state "
+            "SET state = ? "
+            "WHERE task_id = ?"
+        )
+
+    with pytest.raises(TaskStateScopeError):
+        repository._assert_scoped_sql(
+            "INSERT INTO task_state (task_id, state) "
+            "VALUES (?, ?)"
+        )
+
+
+def test_internal_guard_allows_workspace_predicates_and_scoped_inserts():
+    repository = make_repository()
+
+    repository._assert_scoped_sql(
+        "SELECT workspace_id, task_id "
+        "FROM task_state "
+        "WHERE workspace_id = ? AND task_id = ?"
+    )
+    repository._assert_scoped_sql(
+        "INSERT INTO task_state (workspace_id, task_id, state) "
+        "VALUES (?, ?, ?)"
+    )
+
+
+def test_static_checker_requires_workspace_predicate(tmp_path):
+    unsafe = tmp_path / "unsafe_queries.py"
+    unsafe.write_text(
+        '''
+BAD_SELECT = """
+SELECT workspace_id, task_id
+FROM task_state
+WHERE task_id = ?
+"""
+
+BAD_INSERT = """
+INSERT INTO task_state (task_id, state)
+VALUES (?, ?)
+"""
+''',
+        encoding="utf-8",
+    )
+    safe = tmp_path / "safe_queries.py"
+    safe.write_text(
+        '''
+GOOD_SELECT = """
+SELECT workspace_id, task_id
+FROM task_state
+WHERE workspace_id = ? AND task_id = ?
+"""
+
+GOOD_INSERT = """
+INSERT INTO task_state (workspace_id, task_id, state)
+VALUES (?, ?, ?)
+"""
+''',
+        encoding="utf-8",
+    )
+
+    failures = list(unsafe_task_state_queries(tmp_path))
+
+    assert [path.name for path, _ in failures] == [
+        "unsafe_queries.py",
+        "unsafe_queries.py",
+    ]

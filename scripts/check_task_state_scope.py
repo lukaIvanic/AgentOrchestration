@@ -6,7 +6,8 @@ from pathlib import Path
 
 
 TASK_STATE_QUERY = re.compile(
-    r"(select\s+.+?\s+from|update|delete\s+from)\s+task_state\b",
+    r"(select\s+.+?\s+from|update|delete\s+from|insert\s+into)"
+    r"\s+task_state\b",
     re.IGNORECASE | re.DOTALL,
 )
 SQL_LITERAL = re.compile(r'("""[\s\S]*?"""|\'\'\'[\s\S]*?\'\'\')')
@@ -22,7 +23,16 @@ def unsafe_task_state_queries(root: Path):
             normalized = " ".join(sql.lower().split())
             if not TASK_STATE_QUERY.search(normalized):
                 continue
-            if "workspace_id" not in normalized:
+            if "insert into task_state" in normalized:
+                insert_columns = normalized.split("values", 1)[0]
+                if "workspace_id" not in insert_columns:
+                    yield path, literal.start()
+                continue
+            if " where " not in normalized:
+                yield path, literal.start()
+                continue
+            predicate = normalized.rsplit(" where ", 1)[1]
+            if "workspace_id" not in predicate:
                 yield path, literal.start()
 
 
