@@ -5,7 +5,7 @@ import signal
 import subprocess
 import logging
 from enum import Enum
-from typing import Dict, Optional
+from typing import Dict, Optional, TypedDict
 
 logger = logging.getLogger(__name__)
 
@@ -18,16 +18,50 @@ class RuntimeState(Enum):
     CRASHED = "crashed"
 
 
+class TerminalOutcome(TypedDict):
+    state: str
+    reason: str
+    returncode: Optional[int]
+
+
 class AgentRuntime:
     def __init__(self):
         self._processes: Dict[str, subprocess.Popen] = {}
         self._states: Dict[str, RuntimeState] = {}
+        self._terminal_outcomes: Dict[str, TerminalOutcome] = {}
 
-    def start(self, agent_id: str, command: list, env: Optional[Dict] = None) -> bool:
-        if agent_id in self._processes and self._processes[agent_id].poll() is None:
+    def _record_terminal_outcome(
+        self,
+        agent_id: str,
+        state: RuntimeState,
+        reason: str,
+        returncode: Optional[int] = None,
+    ) -> TerminalOutcome:
+        outcome = self._terminal_outcomes.get(agent_id)
+        if outcome is not None:
+            return outcome
+
+        outcome = {
+            "state": state.value,
+            "reason": reason,
+            "returncode": returncode,
+        }
+        self._terminal_outcomes[agent_id] = outcome
+        self._states[agent_id] = state
+        return outcome
+
+    def start(
+        self,
+        agent_id: str,
+        command: list,
+        env: Optional[Dict] = None,
+    ) -> bool:
+        proc = self._processes.get(agent_id)
+        if proc is not None and proc.poll() is None:
             logger.warning(f"Agent {agent_id} is already running")
             return False
 
+        self._terminal_outcomes.pop(agent_id, None)
         self._states[agent_id] = RuntimeState.STARTING
         process_env = os.environ.copy()
         if env:
@@ -46,7 +80,11 @@ class AgentRuntime:
             logger.info(f"Agent {agent_id} started (PID: {proc.pid})")
             return True
         except Exception as e:
-            self._states[agent_id] = RuntimeState.CRASHED
+            self._record_terminal_outcome(
+                agent_id,
+                RuntimeState.CRASHED,
+                f"start_failed: {e}",
+            )
             logger.error(f"Failed to start agent {agent_id}: {e}")
             return False
 
@@ -55,7 +93,12 @@ class AgentRuntime:
         if not proc or proc.poll() is not None:
             return False
 
-        self._states[agent_id] = RuntimeState.STOPPING
+        self._record_terminal_outcome(
+            agent_id,
+            RuntimeState.STOPPED,
+            "worker_shutdown_requested",
+            proc.poll(),
+        )
         proc.send_signal(signal.SIGTERM)
         try:
             proc.wait(timeout=timeout)
@@ -63,19 +106,34 @@ class AgentRuntime:
             proc.kill()
             proc.wait()
 
-        self._states[agent_id] = RuntimeState.STOPPED
         logger.info(f"Agent {agent_id} stopped")
         return True
 
     def get_state(self, agent_id: str) -> RuntimeState:
         proc = self._processes.get(agent_id)
         if proc and proc.poll() is not None:
-            self._states[agent_id] = RuntimeState.CRASHED
+            returncode = proc.poll()
+            if returncode == 0:
+                state = RuntimeState.STOPPED
+            else:
+                state = RuntimeState.CRASHED
+            self._record_terminal_outcome(
+                agent_id,
+                state,
+                f"process_exited: returncode={returncode}",
+                returncode,
+            )
         return self._states.get(agent_id, RuntimeState.STOPPED)
 
     def is_running(self, agent_id: str) -> bool:
         proc = self._processes.get(agent_id)
         return proc is not None and proc.poll() is None
+
+    def get_terminal_outcome(self, agent_id: str) -> Optional[TerminalOutcome]:
+        outcome = self._terminal_outcomes.get(agent_id)
+        if outcome is None:
+            return None
+        return outcome.copy()
 
 # 2019-01-11T10:56:26 update
 
