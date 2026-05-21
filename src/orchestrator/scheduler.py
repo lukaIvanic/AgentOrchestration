@@ -133,6 +133,17 @@ class TaskScheduler:
         decisions = []
         admitted_by_tenant: Dict[str, int] = {}
         for task in recovered_tasks:
+            if task.get("id") in self._in_flight:
+                self._defer_task(
+                    task,
+                    reason="already_in_flight",
+                    source="restart_recovery",
+                )
+                decisions.append(
+                    self._decision(task, "deferred", "already_in_flight")
+                )
+                continue
+
             tenant_id = self._tenant_for(task)
             running = self._running_count(tenant_id)
             admitted = admitted_by_tenant.get(tenant_id, 0)

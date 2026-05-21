@@ -76,6 +76,38 @@ class TestTaskScheduler:
         assert self.scheduler.audit_log()[-1]["event"] == "recovery_queued"
         assert self.scheduler.audit_log()[-1]["tenant_id"] == "tenant-b"
 
+    def test_recovery_defers_duplicate_in_flight_task_id(self):
+        self.scheduler = TaskScheduler(max_running_per_tenant=2)
+        self.scheduler.enqueue({
+            "id": "task-1",
+            "type": "long",
+            "tenant_id": "tenant-a",
+        })
+        import asyncio
+        running = asyncio.run(self.scheduler.dequeue())
+
+        decisions = self.scheduler.recover_after_restart([
+            {"id": "task-1", "type": "replayed", "tenant_id": "tenant-a"},
+            {"id": "task-2", "type": "replayed", "tenant_id": "tenant-a"},
+        ])
+
+        next_task = asyncio.run(self.scheduler.dequeue())
+        assert running["id"] == "task-1"
+        assert decisions[0] == {
+            "task_id": "task-1",
+            "tenant_id": "tenant-a",
+            "decision": "deferred",
+            "reason": "already_in_flight",
+            "state": "deferred",
+        }
+        assert decisions[1]["decision"] == "queued"
+        assert self.scheduler.deferred("task-1")["deferred_reason"] == (
+            "already_in_flight"
+        )
+        assert next_task["id"] == "task-2"
+        assert self.scheduler.audit_log()[-2]["reason"] == "already_in_flight"
+        assert "payload" not in self.scheduler.audit_log()[-2]
+
 # 2019-01-09T19:07:03 update
 
 # 2019-02-18T12:30:02 update
