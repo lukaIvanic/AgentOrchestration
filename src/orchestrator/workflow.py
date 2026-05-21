@@ -53,10 +53,12 @@ class Workflow:
         self.parent_id = parent_id
         self.parent_attempt = parent_attempt
         self.parent_revision = parent_revision
+        self.subworkflow_ids: List[str] = []
 
     def add_step(self, step: WorkflowStep) -> "Workflow":
         self.steps.append(step)
         self._step_map[step.id] = step
+        self.revision += 1
         return self
 
     def get_step(self, step_id: str) -> Optional[WorkflowStep]:
@@ -136,22 +138,28 @@ class WorkflowManager:
                 )
                 return None
 
+            parent_attempt_snapshot = parent.attempt
+            parent_revision_snapshot = parent.revision
             workflow = Workflow(
                 name,
                 description,
                 parent_id=parent.id,
-                parent_attempt=parent.attempt,
-                parent_revision=parent.revision,
+                parent_attempt=parent_attempt_snapshot,
+                parent_revision=parent_revision_snapshot,
             )
             workflow.status = StepStatus.RUNNING
-            workflow.revision += 1
+            workflow.attempt = 1
+            workflow.revision = 1
             self._workflows[workflow.id] = workflow
+            parent.subworkflow_ids.append(workflow.id)
+            parent.revision += 1
             self._audit(
                 "subworkflow_started",
                 workflow.id,
                 parent_id=parent.id,
-                parent_attempt=parent.attempt,
-                parent_revision=parent.revision,
+                parent_attempt=parent_attempt_snapshot,
+                parent_revision=parent_revision_snapshot,
+                new_parent_revision=parent.revision,
             )
             return workflow
 

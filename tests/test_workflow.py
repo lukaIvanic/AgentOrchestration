@@ -66,6 +66,13 @@ def test_subworkflow_start_records_parent_revision():
     assert child.parent_attempt == 2
     assert child.parent_revision == 4
     assert child.status == StepStatus.RUNNING
+    assert child.attempt == 1
+    assert child.revision == 1
+    assert parent.subworkflow_ids == [child.id]
+    assert parent.revision == 5
     assert manager.get_workflow(parent.id).status == StepStatus.RUNNING
     assert len(manager.list_workflows()) == 2
-    assert manager.audit_events()[-1]["event"] == "subworkflow_started"
+    event = manager.audit_events()[-1]
+    assert event["event"] == "subworkflow_started"
+    assert event["metadata"]["parent_revision"] == 4
+    assert event["metadata"]["new_parent_revision"] == 5
