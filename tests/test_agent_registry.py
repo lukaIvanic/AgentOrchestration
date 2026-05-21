@@ -82,6 +82,70 @@ class TestAgentRegistry:
 
         assert [agent["id"] for agent in agents] == [stopped]
 
+    def test_list_cache_is_invalidated_on_status_change(self):
+        running = self.registry.register("agent-1", "worker.processor")
+        stopped = self.registry.register("agent-2", "worker.processor")
+        self.registry.update_status(running, AgentStatus.RUNNING)
+        self.registry.update_status(stopped, AgentStatus.STOPPED)
+
+        assert {agent["id"] for agent in self.registry.list()} == {running}
+
+        self.registry.update_status(stopped, AgentStatus.RUNNING)
+
+        assert {
+            agent["id"] for agent in self.registry.list()
+        } == {running, stopped}
+        assert self.registry.listing_audit[-2]["decision"] == (
+            "cache_invalidated"
+        )
+        assert self.registry.listing_audit[-2]["reason"] == "status_change"
+
+    def test_list_cache_is_invalidated_on_delete(self):
+        first = self.registry.register("agent-1", "worker.processor")
+        second = self.registry.register("agent-2", "worker.processor")
+        self.registry.update_status(first, AgentStatus.RUNNING)
+        self.registry.update_status(second, AgentStatus.RUNNING)
+
+        assert len(self.registry.list()) == 2
+        self.registry.delete(first)
+
+        assert [agent["id"] for agent in self.registry.list()] == [second]
+        assert self.registry.listing_audit[-2]["decision"] == (
+            "cache_invalidated"
+        )
+        assert self.registry.listing_audit[-2]["reason"] == "delete"
+
+    def test_listing_audit_filters_disabled_without_config_leak(self):
+        stopped = self.registry.register(
+            "agent-1",
+            "worker.processor",
+            {"secret": "private-token"},
+        )
+        self.registry.update_status(stopped, AgentStatus.STOPPED)
+
+        assert self.registry.list() == []
+
+        filtered = self.registry.listing_audit[-1]
+        assert filtered["decision"] == "filtered_disabled"
+        assert filtered["agent_id"] == stopped
+        assert filtered["status"] == "stopped"
+        assert "config" not in filtered
+        assert "private-token" not in str(filtered)
+
+    def test_resolve_defers_disabled_agent_and_falls_through(self):
+        stopped = self.registry.register("agent-1", "worker.processor")
+        running = self.registry.register("agent-2", "worker.processor")
+        self.registry.update_status(stopped, AgentStatus.STOPPED)
+        self.registry.update_status(running, AgentStatus.RUNNING)
+
+        resolved = self.registry.resolve("worker.processor")
+
+        assert resolved["id"] == running
+        assert self.registry.listing_audit[-1]["decision"] == (
+            "deferred_disabled_resolution"
+        )
+        assert self.registry.listing_audit[-1]["agent_id"] == stopped
+
 # 2019-01-23T10:28:57 update
 
 # 2019-01-28T18:15:57 update

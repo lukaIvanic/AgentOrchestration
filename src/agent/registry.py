@@ -27,6 +27,8 @@ class AgentRegistry:
         self.storage_backend = storage_backend
         self._agents: Dict[str, Dict[str, Any]] = {}
         self._index: Dict[str, List[str]] = {}
+        self._list_cache: Dict[str, List[str]] = {}
+        self.listing_audit: List[Dict[str, Any]] = []
 
     def register(
         self,
@@ -51,6 +53,7 @@ class AgentRegistry:
         if group not in self._index:
             self._index[group] = []
         self._index[group].append(agent_id)
+        self._invalidate_list_cache("register", agent_id)
         return agent_id
 
     def get(self, agent_id: str) -> Optional[Dict[str, Any]]:
@@ -62,17 +65,37 @@ class AgentRegistry:
         group: Optional[str] = None,
         include_disabled: bool = False,
     ) -> List[Dict[str, Any]]:
-        agents = self._agents.values()
-        if status:
-            agents = [a for a in agents if a["status"] == status.value]
-        elif not include_disabled:
-            agents = [
-                a for a in agents
-                if a["status"] not in self.DISABLED_STATUSES
+        cache_key = self._list_cache_key(status, group, include_disabled)
+        cached_ids = self._list_cache.get(cache_key)
+        if cached_ids is not None:
+            self._audit_listing("cache_hit", group=group, status=status)
+            return [
+                self._agents[agent_id]
+                for agent_id in cached_ids
+                if agent_id in self._agents
             ]
+
+        agents = list(self._agents.values())
         if group:
             agent_ids = self._index.get(group, [])
             agents = [a for a in agents if a["id"] in agent_ids]
+        if status:
+            agents = [a for a in agents if a["status"] == status.value]
+        elif not include_disabled:
+            visible = []
+            for agent in agents:
+                if agent["status"] in self.DISABLED_STATUSES:
+                    self._audit_listing(
+                        "filtered_disabled",
+                        agent_id=agent["id"],
+                        agent_type=agent["type"],
+                        status=AgentStatus(agent["status"]),
+                        group=group,
+                    )
+                    continue
+                visible.append(agent)
+            agents = visible
+        self._list_cache[cache_key] = [a["id"] for a in agents]
         return list(agents)
 
     def update_status(self, agent_id: str, status: AgentStatus) -> bool:
@@ -80,7 +103,30 @@ class AgentRegistry:
             return False
         self._agents[agent_id]["status"] = status.value
         self._agents[agent_id]["updated_at"] = time.time()
+        self._invalidate_list_cache("status_change", agent_id)
         return True
+
+    def resolve(
+        self,
+        agent_type: str,
+        include_disabled: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        for agent in self._agents.values():
+            if agent["type"] != agent_type:
+                continue
+            if (
+                not include_disabled
+                and agent["status"] in self.DISABLED_STATUSES
+            ):
+                self._audit_listing(
+                    "deferred_disabled_resolution",
+                    agent_id=agent["id"],
+                    agent_type=agent["type"],
+                    status=AgentStatus(agent["status"]),
+                )
+                continue
+            return agent
+        return None
 
     def delete(self, agent_id: str) -> bool:
         if agent_id not in self._agents:
@@ -89,10 +135,54 @@ class AgentRegistry:
         group = agent["type"].split(".")[0]
         if group in self._index and agent_id in self._index[group]:
             self._index[group].remove(agent_id)
+        self._invalidate_list_cache("delete", agent_id)
         return True
 
     def count(self) -> int:
         return len(self._agents)
+
+    def _list_cache_key(
+        self,
+        status: Optional[AgentStatus],
+        group: Optional[str],
+        include_disabled: bool,
+    ) -> str:
+        status_value = status.value if status else ""
+        group_value = group or ""
+        return f"{status_value}:{group_value}:{include_disabled}"
+
+    def _invalidate_list_cache(self, reason: str, agent_id: str) -> None:
+        if self._list_cache:
+            self._audit_listing(
+                "cache_invalidated",
+                agent_id=agent_id,
+                reason=reason,
+            )
+        self._list_cache.clear()
+        self._audit_listing(
+            "list_visibility_changed",
+            agent_id=agent_id,
+            reason=reason,
+        )
+
+    def _audit_listing(
+        self,
+        decision: str,
+        agent_id: Optional[str] = None,
+        agent_type: Optional[str] = None,
+        status: Optional[AgentStatus] = None,
+        group: Optional[str] = None,
+        reason: Optional[str] = None,
+    ) -> None:
+        self.listing_audit.append({
+            "decision": decision,
+            "agent_id": agent_id,
+            "agent_type": agent_type,
+            "status": status.value if status else None,
+            "group": group,
+            "reason": reason,
+            "timestamp": time.time(),
+        })
 
 # 2019-01-29T11:24:49 update
 
