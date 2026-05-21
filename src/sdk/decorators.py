@@ -14,27 +14,33 @@ def task(name: Optional[str] = None, retries: int = 0, timeout: int = 300):
             "timeout": timeout,
         }
 
-        @functools.wraps(func)
-        async def wrapper(*args, **kwargs):
-            try:
-                if asyncio.iscoroutinefunction(func):
-                    result = await asyncio.wait_for(
+        if asyncio.iscoroutinefunction(func):
+            @functools.wraps(func)
+            async def wrapper(*args, **kwargs):
+                try:
+                    return await asyncio.wait_for(
                         func(*args, **kwargs),
                         timeout=timeout,
                     )
-                else:
-                    loop = asyncio.get_running_loop()
+                except asyncio.TimeoutError:
+                    raise TimeoutError(
+                        f"Task {name or func.__name__} timed out after "
+                        f"{timeout}s"
+                    )
+        else:
+            @functools.wraps(func)
+            async def wrapper(*args, **kwargs):
+                try:
                     call = functools.partial(func, *args, **kwargs)
-                    result = await asyncio.wait_for(
-                        loop.run_in_executor(None, call),
+                    return await asyncio.wait_for(
+                        asyncio.to_thread(call),
                         timeout=timeout,
                     )
-                return result
-            except asyncio.TimeoutError:
-                raise TimeoutError(
-                    f"Task {name or func.__name__} timed out after "
-                    f"{timeout}s"
-                )
+                except asyncio.TimeoutError:
+                    raise TimeoutError(
+                        f"Task {name or func.__name__} timed out after "
+                        f"{timeout}s"
+                    )
 
         return wrapper
     return decorator

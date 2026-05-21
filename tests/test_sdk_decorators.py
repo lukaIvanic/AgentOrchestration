@@ -21,6 +21,16 @@ def test_task_decorator_supports_sync_functions():
     }
 
 
+def test_task_decorator_supports_sync_kwargs():
+    @task(timeout=1)
+    def sync_format(prefix, *, value):
+        return f"{prefix}:{value}"
+
+    result = asyncio.run(sync_format("item", value=7))
+
+    assert result == "item:7"
+
+
 def test_task_decorator_preserves_async_functions():
     @task(timeout=1)
     async def async_add(left, right):
@@ -40,3 +50,12 @@ def test_task_decorator_times_out_sync_functions_cleanly():
 
     with pytest.raises(TimeoutError, match="slow-sync.*timed out"):
         asyncio.run(slow_sync())
+
+
+def test_task_decorator_preserves_sync_exceptions():
+    @task(timeout=1)
+    def sync_fail():
+        raise ValueError("handler failed")
+
+    with pytest.raises(ValueError, match="handler failed"):
+        asyncio.run(sync_fail())
