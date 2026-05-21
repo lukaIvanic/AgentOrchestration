@@ -72,6 +72,7 @@ async def agent_count():
 async def list_run_events(
     run_id: str,
     tenant_id: str,
+    workspace_id: Optional[str] = None,
     cursor: Optional[int] = None,
     offset: Optional[int] = None,
     limit: int = 50,
@@ -86,11 +87,15 @@ async def list_run_events(
     effective_cursor = offset if offset is not None else cursor
     if effective_cursor is None:
         effective_cursor = 0
+    effective_workspace_id = _resolve_workspace_scope(
+        workspace_id,
+        x_workspace_id,
+    )
 
     try:
         page = event_stream_service.list_run_events(
             authorization=authorization,
-            workspace_id=x_workspace_id,
+            workspace_id=effective_workspace_id,
             tenant_id=tenant_id,
             run_id=run_id,
             cursor=effective_cursor,
@@ -117,6 +122,22 @@ async def list_run_events(
         "next_offset": page.next_cursor,
         "events": page.events,
     }
+
+
+def _resolve_workspace_scope(
+    query_workspace_id: Optional[str],
+    header_workspace_id: str,
+) -> str:
+    query_value = query_workspace_id.strip() if query_workspace_id else None
+    header_value = header_workspace_id.strip() if header_workspace_id else None
+    if not query_value and not header_value:
+        raise HTTPException(status_code=422, detail="workspace_id is required")
+    if query_value and header_value and query_value != header_value:
+        raise HTTPException(
+            status_code=422,
+            detail="workspace_id query and header must match",
+        )
+    return header_value or query_value
 
 # 2019-03-18T11:10:18 update
 

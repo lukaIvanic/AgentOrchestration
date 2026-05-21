@@ -65,6 +65,48 @@ def test_authorized_run_events_accept_offset_alias():
     assert service.store.lookup_count == 1
 
 
+def test_authorized_run_events_accept_matching_workspace_query_scope():
+    client, service = make_client()
+    service.store.replace_events(
+        "workspace-a",
+        "tenant-a",
+        "run-1",
+        [{"sequence": 1}],
+    )
+
+    response = client.get(
+        "/api/v2/runs/run-1/events?"
+        "tenant_id=tenant-a&workspace_id=workspace-a&offset=0&limit=1",
+        headers=auth_headers(),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["workspace_id"] == "workspace-a"
+    assert response.json()["events"] == [{"sequence": 1}]
+    assert service.store.lookup_count == 1
+
+
+def test_authorized_run_events_accept_query_only_workspace_scope():
+    client, service = make_client()
+    service.store.replace_events(
+        "workspace-a",
+        "tenant-a",
+        "run-1",
+        [{"sequence": 1}],
+    )
+
+    response = client.get(
+        "/api/v2/runs/run-1/events?"
+        "tenant_id=tenant-a&workspace_id=workspace-a&offset=0&limit=1",
+        headers={"Authorization": "Bearer tenant:tenant-a"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["workspace_id"] == "workspace-a"
+    assert response.json()["events"] == [{"sequence": 1}]
+    assert service.store.lookup_count == 1
+
+
 def test_run_events_reject_unauthorized_tenant_before_lookup():
     client, service = make_client()
     service.store.replace_events(
@@ -216,7 +258,7 @@ def test_run_events_reject_missing_workspace_before_lookup():
         headers={"Authorization": "Bearer tenant:tenant-a"},
     )
 
-    assert response.status_code == 400
+    assert response.status_code == 422
     assert response.json()["detail"] == "workspace_id is required"
     assert service.store.lookup_count == 0
 
@@ -229,8 +271,38 @@ def test_run_events_reject_blank_workspace_before_lookup():
         headers=auth_headers(workspace_id=" "),
     )
 
-    assert response.status_code == 400
+    assert response.status_code == 422
     assert response.json()["detail"] == "workspace_id is required"
+    assert service.store.lookup_count == 0
+
+
+def test_run_events_reject_blank_query_workspace_before_lookup():
+    client, service = make_client()
+
+    response = client.get(
+        "/api/v2/runs/run-1/events?"
+        "tenant_id=tenant-a&workspace_id=%20&offset=0&limit=1",
+        headers={"Authorization": "Bearer tenant:tenant-a"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "workspace_id is required"
+    assert service.store.lookup_count == 0
+
+
+def test_run_events_reject_conflicting_workspace_scope_before_lookup():
+    client, service = make_client()
+
+    response = client.get(
+        "/api/v2/runs/run-1/events?"
+        "tenant_id=tenant-a&workspace_id=workspace-b&offset=0&limit=1",
+        headers=auth_headers(workspace_id="workspace-a"),
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == (
+        "workspace_id query and header must match"
+    )
     assert service.store.lookup_count == 0
 
 
