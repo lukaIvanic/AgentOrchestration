@@ -23,6 +23,26 @@ class TestMetricsCollector:
         snapshot = self.metrics.snapshot()
         assert snapshot["histograms"]["response.time"]["count"] == 2
         assert snapshot["histograms"]["response.time"]["avg"] == 1.0
+        assert snapshot["histograms"]["response.time"]["min"] == 0.5
+        assert snapshot["histograms"]["response.time"]["max"] == 1.5
+
+    def test_histogram_samples_are_bounded(self):
+        metrics = MetricsCollector(histogram_sample_limit=3)
+        for value in range(10):
+            metrics.observe("queue.latency", float(value))
+
+        histogram = metrics.snapshot()["histograms"]["queue.latency"]
+        assert histogram["count"] == 10
+        assert histogram["sum"] == 45.0
+        assert histogram["avg"] == 4.5
+        assert histogram["min"] == 0.0
+        assert histogram["max"] == 9.0
+        assert histogram["samples"] == [7.0, 8.0, 9.0]
+        assert histogram["sample_limit"] == 3
+
+    def test_histogram_sample_limit_rejects_negative_values(self):
+        with pytest.raises(ValueError):
+            MetricsCollector(histogram_sample_limit=-1)
 
     def test_timer(self):
         self.metrics.start_timer("operation")
@@ -30,6 +50,8 @@ class TestMetricsCollector:
         time.sleep(0.01)
         duration = self.metrics.stop_timer("operation")
         assert duration > 0.005
+        snapshot = self.metrics.snapshot()
+        assert snapshot["histograms"]["operation"]["count"] == 1
 
 # 2019-07-16T09:29:21 update
 
