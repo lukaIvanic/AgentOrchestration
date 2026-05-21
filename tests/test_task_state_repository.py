@@ -39,6 +39,42 @@ def test_task_id_collisions_are_isolated_by_workspace():
     assert repository.get("workspace-b", "task-123").status == "queued"
 
 
+def test_repository_reads_return_defensive_copies():
+    repository = ScopedTaskStateRepository()
+    original = {"id": "task-1", "payload": {"secret": "original"}}
+
+    repository.save("workspace-a", "task-1", original, status="queued")
+    original["payload"]["secret"] = "mutated after save"
+
+    first_read = repository.get("workspace-a", "task-1")
+    first_read.status = "completed"
+    first_read.task["payload"]["secret"] = "mutated after read"
+
+    second_read = repository.get("workspace-a", "task-1")
+
+    assert second_read.status == "queued"
+    assert second_read.task["payload"]["secret"] == "original"
+
+
+def test_repository_list_returns_defensive_copies():
+    repository = ScopedTaskStateRepository()
+    repository.save(
+        "workspace-a",
+        "task-1",
+        {"id": "task-1", "payload": {"value": 1}},
+        status="queued",
+    )
+
+    listed = repository.list("workspace-a")
+    listed[0].status = "completed"
+    listed[0].task["payload"]["value"] = 99
+
+    stored = repository.get("workspace-a", "task-1")
+
+    assert stored.status == "queued"
+    assert stored.task["payload"]["value"] == 1
+
+
 def test_workspace_scope_is_required_for_all_repository_access():
     repository = ScopedTaskStateRepository()
 

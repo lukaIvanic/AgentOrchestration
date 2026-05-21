@@ -1,5 +1,6 @@
 """Workspace-scoped task state storage."""
 
+import copy
 from dataclasses import dataclass, field
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -38,12 +39,25 @@ class TaskState:
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 
+    def clone(self) -> "TaskState":
+        return TaskState(
+            workspace_id=self.workspace_id,
+            task_id=self.task_id,
+            status=self.status,
+            task=copy.deepcopy(self.task),
+            queue=self.queue,
+            priority=self.priority,
+            retries=self.retries,
+            created_at=self.created_at,
+            updated_at=self.updated_at,
+        )
+
     def snapshot(self) -> Dict[str, Any]:
         return {
             "workspace_id": self.workspace_id,
             "task_id": self.task_id,
             "status": self.status,
-            "task": dict(self.task),
+            "task": copy.deepcopy(self.task),
             "queue": self.queue,
             "priority": self.priority,
             "retries": self.retries,
@@ -82,7 +96,7 @@ class ScopedTaskStateRepository:
             workspace_id=workspace_id,
             task_id=task_id,
             status=status,
-            task=dict(task),
+            task=copy.deepcopy(task),
             queue=queue,
             priority=priority,
             retries=retries,
@@ -94,7 +108,8 @@ class ScopedTaskStateRepository:
 
     def get(self, workspace_id: str, task_id: str) -> Optional[TaskState]:
         workspace_id = require_workspace_id(workspace_id)
-        return self._records.get((workspace_id, task_id))
+        state = self._records.get((workspace_id, task_id))
+        return state.clone() if state else None
 
     def update(
         self,
@@ -114,7 +129,7 @@ class ScopedTaskStateRepository:
         if status is not None:
             state.status = status
         if task is not None:
-            state.task = dict(task)
+            state.task = copy.deepcopy(task)
         if queue is not None:
             state.queue = queue
         if priority is not None:
@@ -141,7 +156,7 @@ class ScopedTaskStateRepository:
         ]
         if status is not None:
             states = [state for state in states if state.status == status]
-        return list(states)
+        return [state.clone() for state in states]
 
     def get_by_task_id(self, task_id: str) -> Optional[TaskState]:
         raise UnscopedTaskStateAccessError("get_by_task_id")
