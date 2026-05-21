@@ -3,7 +3,7 @@
 import asyncio
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List
 
 from src.agent import AgentRegistry, AgentStatus
 from src.orchestrator.scheduler import TaskScheduler
@@ -54,8 +54,26 @@ class OrchestrationEngine:
             agent = self.registry.get(agent_id)
             if not agent:
                 raise ValueError(f"Agent {agent_id} not found")
-
-            self.registry.update_status(agent_id, AgentStatus.RUNNING)
+            required_permission = task.get("required_permission")
+            if required_permission:
+                agent = self.registry.update_status_if_authorized(
+                    agent_id,
+                    AgentStatus.RUNNING,
+                    required_permission,
+                    principal=task.get("principal", "*"),
+                    allowed_statuses={
+                        AgentStatus.PENDING,
+                        AgentStatus.PAUSED,
+                        AgentStatus.RUNNING,
+                    },
+                )
+                if not agent:
+                    raise PermissionError(
+                        f"Agent {agent_id} is not authorized for "
+                        f"{required_permission}"
+                    )
+            else:
+                self.registry.update_status(agent_id, AgentStatus.RUNNING)
             result = await asyncio.wait_for(
                 self._run_agent_task(agent, task),
                 timeout=self.agent_timeout,
@@ -82,7 +100,10 @@ class OrchestrationEngine:
         )
 
     def _execute_in_thread(self, agent: Dict, task: Dict) -> Any:
-        return {"status": "completed", "output": f"Task {task['id']} processed by {agent['name']}"}
+        return {
+            "status": "completed",
+            "output": f"Task {task['id']} processed by {agent['name']}",
+        }
 
 # 2019-04-24T14:55:39 update
 

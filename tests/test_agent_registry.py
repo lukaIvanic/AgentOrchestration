@@ -1,4 +1,3 @@
-import pytest
 from src.agent.registry import AgentRegistry, AgentStatus
 
 
@@ -47,6 +46,112 @@ class TestAgentRegistry:
 
     def test_delete_nonexistent_agent(self):
         assert not self.registry.delete("nonexistent-id")
+
+    def test_authorization_cache_rechecks_permission_changes(self):
+        agent_id = self.registry.register(
+            "test-agent",
+            "worker.processor",
+            {"permissions": ["tasks.execute"]},
+        )
+        self.registry.update_status(agent_id, AgentStatus.RUNNING)
+        assert (
+            self.registry.resolve_authorized(
+                agent_id,
+                "TASKS.EXECUTE",
+                principal="scheduler",
+            )["id"]
+            == agent_id
+        )
+
+        assert self.registry.set_permissions(agent_id, [])
+
+        assert (
+            self.registry.resolve_authorized(
+                agent_id,
+                "tasks.execute",
+                principal="scheduler",
+            )
+            is None
+        )
+        assert self.registry.get(agent_id)["status"] == "running"
+        events = self.registry.audit_events()
+        assert any(event["event"] == "permissions_changed" for event in events)
+        assert events[-1]["event"] == "auth_denied"
+        assert events[-1]["metadata"]["reason"] == "permission_revoked"
+
+    def test_authorized_status_transition_rechecks_cached_permission(self):
+        agent_id = self.registry.register(
+            "test-agent",
+            "worker.processor",
+            {"permissions": ["tasks.execute"]},
+        )
+
+        assert (
+            self.registry.resolve_authorized(
+                agent_id,
+                "tasks.execute",
+                principal="scheduler",
+                allowed_statuses={AgentStatus.PENDING},
+            )["id"]
+            == agent_id
+        )
+        assert self.registry.set_permissions(agent_id, [])
+
+        assert (
+            self.registry.update_status_if_authorized(
+                agent_id,
+                AgentStatus.RUNNING,
+                "tasks.execute",
+                principal="scheduler",
+                allowed_statuses={AgentStatus.PENDING},
+            )
+            is None
+        )
+
+        assert self.registry.get(agent_id)["status"] == "pending"
+        events = self.registry.audit_events()
+        assert events[-1]["event"] == "auth_denied"
+        assert events[-1]["metadata"]["reason"] == "permission_revoked"
+        assert not any(
+            event["event"] == "authorized_status_changed"
+            for event in events
+        )
+
+    def test_authorized_status_transition_commits_under_registry_lock(self):
+        agent_id = self.registry.register(
+            "test-agent",
+            "worker.processor",
+            {"permissions": ["tasks.execute"]},
+        )
+
+        agent = self.registry.update_status_if_authorized(
+            agent_id,
+            AgentStatus.RUNNING,
+            "TASKS.EXECUTE",
+            principal="scheduler",
+            allowed_statuses={AgentStatus.PENDING},
+        )
+
+        assert agent["id"] == agent_id
+        assert self.registry.get(agent_id)["status"] == "running"
+        events = self.registry.audit_events()
+        assert events[-1]["event"] == "authorized_status_changed"
+        assert events[-1]["metadata"]["permission"] == "tasks.execute"
+
+    def test_authorized_resolution_defers_terminal_lifecycle_state(self):
+        agent_id = self.registry.register(
+            "test-agent",
+            "worker.processor",
+            {"permissions": ["tasks.execute"]},
+        )
+        self.registry.update_status(agent_id, AgentStatus.STOPPED)
+
+        assert (
+            self.registry.resolve_authorized(agent_id, "tasks.execute")
+            is None
+        )
+        assert self.registry.get(agent_id)["status"] == "stopped"
+        assert self.registry.audit_events()[-1]["event"] == "auth_deferred"
 
 # 2019-01-23T10:28:57 update
 
