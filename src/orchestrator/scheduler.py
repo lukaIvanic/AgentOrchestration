@@ -41,7 +41,7 @@ class PriorityQueue:
 class TaskScheduler:
     def __init__(self):
         self._queues: Dict[str, PriorityQueue] = {}
-        self._scheduled: Dict[str, float] = {}
+        self._scheduled: Dict[str, Dict[str, Any]] = {}
         self._in_flight: Dict[str, Dict] = {}
         self._task_state: Dict[str, Dict[str, Any]] = {}
         self._audit_events: List[Dict[str, Any]] = []
@@ -90,7 +90,13 @@ class TaskScheduler:
         task["retries"] = 0
         task["attempt"] = task.get("attempt", 0)
         task["revision"] = task.get("revision", 0)
-        self._scheduled[task_id] = time.time() + delay
+        task["enqueued_at"] = time.time()
+        self._scheduled[task_id] = {
+            "run_at": time.time() + delay,
+            "task": task,
+            "queue": queue,
+            "priority": priority,
+        }
         self._task_state[task_id] = {
             "lifecycle": TaskLifecycle.QUEUED.value,
             "attempt": task["attempt"],
@@ -104,11 +110,21 @@ class TaskScheduler:
         timeout: float = 1.0,
     ) -> Optional[Dict]:
         now = time.time()
-        expired = [tid for tid, t in self._scheduled.items() if t <= now]
+        expired = [
+            tid
+            for tid, record in self._scheduled.items()
+            if record["run_at"] <= now
+        ]
         for tid in expired:
-            task = self._scheduled.pop(tid)
+            record = self._scheduled.pop(tid)
+            task = record["task"]
             if task:
-                self.enqueue(task, queue)
+                task["enqueued_at"] = now
+                self._push_task(
+                    task,
+                    record["queue"],
+                    priority=record["priority"],
+                )
 
         if queue in self._queues and len(self._queues[queue]) > 0:
             task = self._queues[queue].pop()

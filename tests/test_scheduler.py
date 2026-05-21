@@ -35,6 +35,26 @@ class TestTaskScheduler:
         task = asyncio.run(self.scheduler.dequeue())
         assert self.scheduler.fail(task["id"])
 
+    def test_scheduled_task_preserves_task_identity_and_queue(self):
+        import asyncio
+
+        task_id = self.scheduler.schedule(
+            {"type": "delayed"},
+            delay=-1,
+            queue="slow",
+            priority=7,
+        )
+
+        assert asyncio.run(self.scheduler.dequeue("default")) is None
+
+        task = asyncio.run(self.scheduler.dequeue("slow"))
+        assert task is not None
+        assert task["id"] == task_id
+        assert task["type"] == "delayed"
+        assert self.scheduler.get_task_state(task_id)["lifecycle"] == (
+            "running"
+        )
+
     def test_child_retry_rejected_after_parent_cancel(self):
         import asyncio
 
