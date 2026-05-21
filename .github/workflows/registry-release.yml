@@ -1,0 +1,64 @@
+name: Registry Release
+
+on:
+  push:
+    branches:
+      - main
+      - "release/**"
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Package version to publish"
+        required: true
+      dry_run:
+        description: "Build without publishing"
+        required: false
+        default: "false"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify signed release tag
+        id: tag-signature
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            if git tag -v "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+              echo "verified=true" >> "${GITHUB_OUTPUT}"
+            else
+              echo "verified=false" >> "${GITHUB_OUTPUT}"
+            fi
+          else
+            echo "verified=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Guard protected publish ref
+        env:
+          GITHUB_REF_PROTECTED: ${{ github.ref_protected }}
+          TAG_SIGNATURE_VERIFIED: ${{ steps.tag-signature.outputs.verified }}
+        run: python -m src.release.publish_guard
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Build package
+        run: uv build
+
+      - name: Authenticate registry after guard
+        if: inputs.dry_run != 'true'
+        run: echo "Registry authentication happens only after ref guard passes."
+
+      - name: Publish package
+        if: inputs.dry_run != 'true'
+        run: echo "Publish package from protected branch or signed release tag."
