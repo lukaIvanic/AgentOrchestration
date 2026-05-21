@@ -1,4 +1,3 @@
-import pytest
 from src.orchestrator.scheduler import TaskScheduler
 
 
@@ -35,6 +34,74 @@ class TestTaskScheduler:
         import asyncio
         task = asyncio.run(self.scheduler.dequeue())
         assert self.scheduler.fail(task["id"])
+
+    def test_recovery_defers_tasks_over_tenant_limit(self):
+        active_id = self.scheduler.enqueue({
+            "type": "active",
+            "tenant_id": "tenant-a",
+        })
+        import asyncio
+        active = asyncio.run(self.scheduler.dequeue())
+        assert active["id"] == active_id
+
+        summary = self.scheduler.recover_tasks(
+            [{
+                "id": "recovered-1",
+                "type": "recovered",
+                "tenant_id": "tenant-a",
+            }],
+            tenant_limits={"tenant-a": 1},
+        )
+
+        assert summary == {"enqueued": 0, "deferred": 1, "skipped": 0}
+        assert asyncio.run(self.scheduler.dequeue()) is None
+        audit = self.scheduler.recovery_audit[-1]
+        assert audit["decision"] == "deferred"
+        assert audit["reason"] == "tenant_concurrency_limit"
+        assert audit["tenant_id"] == "tenant-a"
+        assert audit["tenant_limit"] == 1
+        assert audit["tenant_in_flight"] == 1
+        assert "payload" not in audit
+
+    def test_recovery_preserves_task_id_when_capacity_allows(self):
+        summary = self.scheduler.recover_tasks(
+            [{
+                "id": "recovered-1",
+                "type": "recovered",
+                "tenant_id": "tenant-a",
+                "priority": 7,
+            }],
+            tenant_limits={"tenant-a": 1},
+        )
+
+        assert summary == {"enqueued": 1, "deferred": 0, "skipped": 0}
+        import asyncio
+        recovered = asyncio.run(self.scheduler.dequeue())
+        assert recovered["id"] == "recovered-1"
+        assert recovered["tenant_id"] == "tenant-a"
+        assert self.scheduler.recovery_audit[-1]["decision"] == "enqueued"
+
+    def test_recovery_skips_already_in_flight_task(self):
+        task_id = self.scheduler.enqueue({
+            "type": "active",
+            "tenant_id": "tenant-a",
+        })
+        import asyncio
+        asyncio.run(self.scheduler.dequeue())
+
+        summary = self.scheduler.recover_tasks(
+            [{
+                "id": task_id,
+                "type": "active",
+                "tenant_id": "tenant-a",
+            }],
+            tenant_limits={"tenant-a": 2},
+        )
+
+        assert summary == {"enqueued": 0, "deferred": 0, "skipped": 1}
+        assert self.scheduler.recovery_audit[-1]["decision"] == "skipped"
+        audit = self.scheduler.recovery_audit[-1]
+        assert audit["reason"] == "already_in_flight"
 
 # 2019-01-09T19:07:03 update
 
