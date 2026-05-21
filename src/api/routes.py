@@ -1,22 +1,35 @@
 """API route definitions."""
 
-from fastapi import APIRouter, HTTPException, Depends
-from typing import List, Dict, Optional
+from fastapi import APIRouter, Header, HTTPException
+from typing import Dict, Optional
 
 from src.agent import AgentRegistry, AgentStatus
+from src.api.event_stream import (
+    RunEventPaginationError,
+    RunEventStreamService,
+    RunEventUnauthorizedError,
+)
 
 router = APIRouter()
 registry = AgentRegistry()
+event_stream_service = RunEventStreamService()
 
 
 @router.get("/agents")
-async def list_agents(status: Optional[str] = None, group: Optional[str] = None):
+async def list_agents(
+    status: Optional[str] = None,
+    group: Optional[str] = None,
+):
     status_filter = AgentStatus(status) if status else None
     return {"agents": registry.list(status=status_filter, group=group)}
 
 
 @router.post("/agents")
-async def register_agent(name: str, agent_type: str, config: Optional[Dict] = None):
+async def register_agent(
+    name: str,
+    agent_type: str,
+    config: Optional[Dict] = None,
+):
     agent_id = registry.register(name, agent_type, config)
     return {"agent_id": agent_id, "status": "registered"}
 
@@ -53,6 +66,42 @@ async def stop_agent(agent_id: str):
 @router.get("/agents/count")
 async def agent_count():
     return {"count": registry.count()}
+
+
+@router.get("/runs/{run_id}/events")
+async def list_run_events(
+    run_id: str,
+    tenant_id: str,
+    cursor: int = 0,
+    limit: int = 50,
+    authorization: str = Header(default=""),
+):
+    try:
+        page = event_stream_service.list_run_events(
+            authorization=authorization,
+            tenant_id=tenant_id,
+            run_id=run_id,
+            cursor=cursor,
+            limit=limit,
+        )
+    except RunEventUnauthorizedError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=str(exc),
+        ) from exc
+    except RunEventPaginationError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=str(exc),
+        ) from exc
+    return {
+        "run_id": page.run_id,
+        "tenant_id": page.tenant_id,
+        "cursor": page.cursor,
+        "limit": page.limit,
+        "next_cursor": page.next_cursor,
+        "events": page.events,
+    }
 
 # 2019-03-18T11:10:18 update
 
