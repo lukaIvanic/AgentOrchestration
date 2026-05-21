@@ -45,7 +45,7 @@ def authenticate_request(request: Request) -> AuthPrincipal:
         raise AuthError(401, "Unauthorized")
 
     configured_tokens = _configured_tokens()
-    if configured_tokens and token not in configured_tokens:
+    if token not in configured_tokens:
         raise AuthError(401, "Unauthorized")
 
     if (
@@ -119,8 +119,6 @@ def _scopes_for_token(
     scope_map = _configured_scope_map()
     if token in scope_map:
         return scope_map[token]
-    if configured_tokens:
-        return {"read", "write"}
     return {"read", "write"}
 
 

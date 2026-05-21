@@ -40,7 +40,17 @@ def test_rejects_stale_browser_session_cookie():
     assert response.status_code == 401
 
 
+def test_rejects_unknown_bearer_token_by_default():
+    response = client().get(
+        "/api/v2/agents",
+        headers={"Authorization": "Bearer valid-token"},
+    )
+
+    assert response.status_code == 401
+
+
 def test_rejects_revoked_token(monkeypatch):
+    monkeypatch.setenv("API_TOKENS", "known-bad")
     monkeypatch.setenv("REVOKED_API_TOKENS", "known-bad")
 
     response = client().get(
@@ -52,6 +62,7 @@ def test_rejects_revoked_token(monkeypatch):
 
 
 def test_rejects_read_only_token_for_mutation(monkeypatch):
+    monkeypatch.setenv("API_TOKENS", "reader")
     monkeypatch.setenv("API_TOKEN_SCOPES", "reader=read")
 
     response = client().post(
@@ -66,7 +77,9 @@ def test_rejects_read_only_token_for_mutation(monkeypatch):
     assert response.status_code == 403
 
 
-def test_rejects_insufficient_workspace_role_for_mutation():
+def test_rejects_insufficient_workspace_role_for_mutation(monkeypatch):
+    monkeypatch.setenv("API_TOKENS", "valid-token")
+
     response = client().post(
         "/api/v2/agents",
         params={"name": "worker-1", "agent_type": "worker.processor"},
@@ -80,6 +93,7 @@ def test_rejects_insufficient_workspace_role_for_mutation():
 
 
 def test_rejects_wrong_workspace_for_token(monkeypatch):
+    monkeypatch.setenv("API_TOKENS", "valid-token")
     monkeypatch.setenv("API_TOKEN_WORKSPACES", "valid-token=workspace-a")
 
     response = client().get(
@@ -93,7 +107,9 @@ def test_rejects_wrong_workspace_for_token(monkeypatch):
     assert response.status_code == 403
 
 
-def test_authorized_token_read_and_write_still_work():
+def test_authorized_token_read_and_write_still_work(monkeypatch):
+    monkeypatch.setenv("API_TOKENS", "valid-token")
+
     test_client = client()
 
     create_response = test_client.post(
@@ -115,7 +131,9 @@ def test_authorized_token_read_and_write_still_work():
     assert len(list_response.json()["agents"]) >= 1
 
 
-def test_authorized_browser_session_read_still_works():
+def test_authorized_browser_session_read_still_works(monkeypatch):
+    monkeypatch.setenv("API_TOKENS", "browser-session")
+
     response = client().get(
         "/api/v2/agents",
         cookies={"ao_session": "browser-session"},
