@@ -47,6 +47,31 @@ def test_subworkflow_start_rejects_non_running_parent_without_mutation():
     assert rejected["metadata"]["reason"] == "parent_not_running"
 
 
+def test_subworkflow_start_rejects_stale_parent_attempt():
+    manager = WorkflowManager()
+    parent = manager.create_workflow("parent")
+    parent.status = StepStatus.RUNNING
+    parent.attempt = 3
+    parent.revision = 2
+
+    child = manager.start_subworkflow(
+        parent.id,
+        "child",
+        parent_attempt=2,
+        parent_revision=2,
+    )
+
+    assert child is None
+    assert manager.get_workflow(parent.id).status == StepStatus.RUNNING
+    assert manager.get_workflow(parent.id).revision == 2
+    assert len(manager.list_workflows()) == 1
+    rejected = manager.audit_events()[-1]
+    assert rejected["event"] == "subworkflow_start_rejected"
+    assert rejected["metadata"]["reason"] == "stale_parent_attempt"
+    assert rejected["metadata"]["expected"] == 3
+    assert rejected["metadata"]["actual"] == 2
+
+
 def test_subworkflow_start_records_parent_revision():
     manager = WorkflowManager()
     parent = manager.create_workflow("parent")
