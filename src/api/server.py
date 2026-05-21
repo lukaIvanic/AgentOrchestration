@@ -3,15 +3,21 @@
 import os
 from typing import Dict
 
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 
 from .routes import router
+from .auth import AuthService
 from .middleware import AuthMiddleware, RateLimitMiddleware, LoggingMiddleware
+from .task_monitor import TaskMonitor
 
 
 def create_app(config: Dict = None) -> FastAPI:
+    config = config or {}
+    auth_service = config.get("auth_service") or AuthService()
+    task_monitor = config.get("task_monitor") or TaskMonitor()
+
     app = FastAPI(
         title="Agent Orchestrator API",
         version="2.4.1",
@@ -28,9 +34,15 @@ def create_app(config: Dict = None) -> FastAPI:
         allow_headers=["*"],
     )
 
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=os.getenv("TRUSTED_HOSTS", "*").split(","))
+    app.state.auth_service = auth_service
+    app.state.task_monitor = task_monitor
 
-    app.add_middleware(AuthMiddleware)
+    app.add_middleware(
+        TrustedHostMiddleware,
+        allowed_hosts=os.getenv("TRUSTED_HOSTS", "*").split(","),
+    )
+
+    app.add_middleware(AuthMiddleware, auth_service=auth_service)
     app.add_middleware(RateLimitMiddleware)
     app.add_middleware(LoggingMiddleware)
 
