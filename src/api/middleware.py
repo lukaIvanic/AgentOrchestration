@@ -1,22 +1,93 @@
-"""API middleware components."""
-
-import time
 import logging
-from typing import Callable
+import time
+from contextvars import ContextVar
+from hashlib import sha256
+from typing import Callable, Optional
+
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
 logger = logging.getLogger(__name__)
 
+audit_actor_context: ContextVar[Optional[str]] = ContextVar(
+    "audit_actor_context",
+    default=None,
+)
+
+
+def get_current_audit_actor() -> Optional[str]:
+    return audit_actor_context.get()
+
+
+def _is_protected_api_path(request: Request) -> bool:
+    return (
+        request.url.path.startswith("/api/v2")
+        and request.url.path != "/api/v2/auth/token"
+    )
+
+
+def _audit_rejected_response(reason: str) -> Response:
+    logger.info("audit rejected protected request: %s", reason)
+    return Response(
+        status_code=401,
+        content="Unauthorized",
+        headers={"X-Audit-Status": "rejected"},
+    )
+
 
 class AuthMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        if request.url.path.startswith("/api/v2") and request.url.path != "/api/v2/auth/token":
-            token = request.headers.get("Authorization", "")
-            if not token.startswith("Bearer "):
-                return Response(status_code=401, content="Unauthorized")
-        return await call_next(request)
+    async def dispatch(
+        self,
+        request: Request,
+        call_next: Callable,
+    ) -> Response:
+        if not _is_protected_api_path(request):
+            return await call_next(request)
+
+        authorization = request.headers.get("Authorization", "")
+        prefix = "Bearer "
+        if not authorization.startswith(prefix):
+            return _audit_rejected_response("missing_bearer")
+
+        bearer = authorization.removeprefix(prefix).strip()
+        if not bearer:
+            return _audit_rejected_response("blank_bearer")
+
+        actor = "bearer:" + sha256(bearer.encode("utf-8")).hexdigest()[:16]
+        request.state.authenticated_actor = actor
+        try:
+            return await call_next(request)
+        finally:
+            if hasattr(request.state, "authenticated_actor"):
+                delattr(request.state, "authenticated_actor")
+
+
+class AuditMiddleware(BaseHTTPMiddleware):
+    async def dispatch(
+        self,
+        request: Request,
+        call_next: Callable,
+    ) -> Response:
+        if not _is_protected_api_path(request):
+            return await call_next(request)
+
+        actor = getattr(request.state, "authenticated_actor", None)
+        if not actor:
+            return _audit_rejected_response("missing_authenticated_actor")
+
+        request.state.audit_actor = actor
+        token = audit_actor_context.set(actor)
+        try:
+            response = await call_next(request)
+            response.headers["X-Audit-Status"] = "accepted"
+            response.headers["X-Audit-Actor"] = actor
+            logger.info("audit accepted protected request for %s", actor)
+            return response
+        finally:
+            audit_actor_context.reset(token)
+            if hasattr(request.state, "audit_actor"):
+                delattr(request.state, "audit_actor")
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
@@ -26,14 +97,21 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self.window = window
         self._requests = {}
 
-    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+    async def dispatch(
+        self,
+        request: Request,
+        call_next: Callable,
+    ) -> Response:
         client_ip = request.client.host if request.client else "unknown"
         now = time.time()
 
         if client_ip not in self._requests:
             self._requests[client_ip] = []
 
-        self._requests[client_ip] = [t for t in self._requests[client_ip] if now - t < self.window]
+        self._requests[client_ip] = [
+            t for t in self._requests[client_ip]
+            if now - t < self.window
+        ]
 
         if len(self._requests[client_ip]) >= self.max_requests:
             return Response(status_code=429, content="Too many requests")
@@ -43,11 +121,21 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
 
 class LoggingMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+    async def dispatch(
+        self,
+        request: Request,
+        call_next: Callable,
+    ) -> Response:
         start = time.time()
         response = await call_next(request)
         duration = time.time() - start
-        logger.info(f"{request.method} {request.url.path} {response.status_code} {duration:.3f}s")
+        logger.info(
+            "%s %s %s %.3fs",
+            request.method,
+            request.url.path,
+            response.status_code,
+            duration,
+        )
         return response
 
 # 2019-03-01T18:35:19 update
