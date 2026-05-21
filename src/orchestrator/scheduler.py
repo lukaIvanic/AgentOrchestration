@@ -128,16 +128,19 @@ class TaskScheduler:
     def fail(self, task_id: str, queue: str = "default") -> bool:
         task = self._in_flight.pop(task_id, None)
         if task:
-            retry_block_reason = self._retry_block_reason(task)
-            if retry_block_reason:
+            rejection_reason = self._retry_rejection_reason(task)
+            if rejection_reason:
                 self._set_lifecycle(task_id, TaskLifecycle.CANCELED)
                 self._record_audit(
                     "child_retry_rejected",
                     task_id=task_id,
                     parent_id=task.get("parent_id"),
-                    reason=retry_block_reason,
-                    task_attempt=task.get("attempt"),
-                    task_revision=task.get("revision"),
+                    reason=rejection_reason,
+                    child_attempt=task.get("attempt"),
+                    child_revision=task.get("revision"),
+                    parent_attempt=task.get("parent_attempt"),
+                    parent_revision=task.get("parent_revision"),
+                    parent_lifecycle=self._parent_lifecycle(task),
                 )
                 return False
 
@@ -185,14 +188,14 @@ class TaskScheduler:
         )
         state["lifecycle"] = lifecycle.value
 
-    def _retry_block_reason(self, task: Dict) -> Optional[str]:
+    def _retry_rejection_reason(self, task: Dict) -> Optional[str]:
         parent_id = task.get("parent_id")
         if not parent_id:
             return None
 
         parent_state = self._task_state.get(parent_id)
         if parent_state is None:
-            return "missing_parent_state"
+            return "parent_missing"
         if parent_state.get("lifecycle") == TaskLifecycle.CANCELED.value:
             return "parent_canceled"
 
@@ -210,13 +213,25 @@ class TaskScheduler:
             return "stale_parent_revision"
         return None
 
+    def _parent_lifecycle(self, task: Dict) -> Optional[str]:
+        parent_id = task.get("parent_id")
+        if not parent_id:
+            return None
+        parent_state = self._task_state.get(parent_id)
+        if not parent_state:
+            return None
+        return parent_state.get("lifecycle")
+
     def _record_audit(self, event: str, **metadata: Any) -> None:
         allowed = {
             "task_id",
             "parent_id",
             "reason",
-            "task_attempt",
-            "task_revision",
+            "child_attempt",
+            "child_revision",
+            "parent_attempt",
+            "parent_revision",
+            "parent_lifecycle",
         }
         sanitized = {
             key: value
