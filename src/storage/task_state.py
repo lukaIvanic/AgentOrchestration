@@ -125,6 +125,32 @@ class TaskStateRepository:
         self._connection.commit()
         return cursor.rowcount > 0
 
+    def exists(self, workspace_id: str, task_id: str) -> bool:
+        workspace_id = self._require_scope("workspace_id", workspace_id)
+        task_id = self._require_scope("task_id", task_id)
+        cursor = self._execute_scoped(
+            """
+            SELECT 1
+            FROM task_state
+            WHERE workspace_id = ? AND task_id = ?
+            LIMIT 1
+            """,
+            (workspace_id, task_id),
+        )
+        return cursor.fetchone() is not None
+
+    def count_for_workspace(self, workspace_id: str) -> int:
+        workspace_id = self._require_scope("workspace_id", workspace_id)
+        cursor = self._execute_scoped(
+            """
+            SELECT COUNT(*)
+            FROM task_state
+            WHERE workspace_id = ?
+            """,
+            (workspace_id,),
+        )
+        return int(cursor.fetchone()[0])
+
     def list_for_workspace(
         self,
         workspace_id: str,
@@ -141,6 +167,22 @@ class TaskStateRepository:
             (workspace_id,),
         )
         return [self._deserialize(row) for row in cursor.fetchall()]
+
+    def get_by_task_id(self, task_id: str) -> None:
+        raise TaskStateScopeError(
+            "get_by_task_id is blocked; use get(workspace_id, task_id)"
+        )
+
+    def update_by_task_id(self, task_id: str, state: str) -> None:
+        raise TaskStateScopeError(
+            "update_by_task_id is blocked; "
+            "use update_state(workspace_id, task_id, state)"
+        )
+
+    def delete_by_task_id(self, task_id: str) -> None:
+        raise TaskStateScopeError(
+            "delete_by_task_id is blocked; use delete(workspace_id, task_id)"
+        )
 
     def _ensure_schema(self) -> None:
         self._connection.execute(

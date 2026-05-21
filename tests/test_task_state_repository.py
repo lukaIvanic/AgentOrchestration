@@ -62,6 +62,18 @@ def test_deletes_require_workspace_scope_and_leave_other_workspace_rows():
     assert repository.get("workspace-b", "task-1") is not None
 
 
+def test_exists_and_count_are_scoped_by_workspace():
+    repository = make_repository()
+    repository.upsert("workspace-a", "task-1", "running")
+    repository.upsert("workspace-b", "task-1", "running")
+    repository.upsert("workspace-b", "task-2", "running")
+
+    assert repository.exists("workspace-a", "task-1")
+    assert not repository.exists("workspace-a", "task-2")
+    assert repository.count_for_workspace("workspace-a") == 1
+    assert repository.count_for_workspace("workspace-b") == 2
+
+
 def test_empty_workspace_or_task_id_is_rejected():
     repository = make_repository()
 
@@ -70,6 +82,21 @@ def test_empty_workspace_or_task_id_is_rejected():
 
     with pytest.raises(TaskStateScopeError, match="task_id is required"):
         repository.get("workspace-a", "")
+
+
+@pytest.mark.parametrize(
+    "method,args",
+    [
+        ("get_by_task_id", ("task-1",)),
+        ("update_by_task_id", ("task-1", "running")),
+        ("delete_by_task_id", ("task-1",)),
+    ],
+)
+def test_unscoped_task_id_helpers_are_explicitly_blocked(method, args):
+    repository = make_repository()
+
+    with pytest.raises(TaskStateScopeError, match="blocked"):
+        getattr(repository, method)(*args)
 
 
 def test_internal_guard_blocks_unscoped_task_state_predicates():
@@ -114,36 +141,39 @@ def test_internal_guard_allows_workspace_predicates_and_scoped_inserts():
 
 
 def test_static_checker_requires_workspace_predicate(tmp_path):
+    triple_quote = '"' * 3
     unsafe = tmp_path / "unsafe_queries.py"
     unsafe.write_text(
-        '''
-BAD_SELECT = """
-SELECT workspace_id, task_id
-FROM task_state
-WHERE task_id = ?
-"""
-
-BAD_INSERT = """
-INSERT INTO task_state (task_id, state)
-VALUES (?, ?)
-"""
-''',
+        "\n".join([
+            f"BAD_SELECT = {triple_quote}",
+            "SELECT workspace_id, task_id",
+            "FROM task_state",
+            "WHERE task_id = ?",
+            triple_quote,
+            "",
+            f"BAD_INSERT = {triple_quote}",
+            "INSERT INTO task_state (task_id, state)",
+            "VALUES (?, ?)",
+            triple_quote,
+            "",
+        ]),
         encoding="utf-8",
     )
     safe = tmp_path / "safe_queries.py"
     safe.write_text(
-        '''
-GOOD_SELECT = """
-SELECT workspace_id, task_id
-FROM task_state
-WHERE workspace_id = ? AND task_id = ?
-"""
-
-GOOD_INSERT = """
-INSERT INTO task_state (workspace_id, task_id, state)
-VALUES (?, ?, ?)
-"""
-''',
+        "\n".join([
+            f"GOOD_SELECT = {triple_quote}",
+            "SELECT workspace_id, task_id",
+            "FROM task_state",
+            "WHERE workspace_id = ? AND task_id = ?",
+            triple_quote,
+            "",
+            f"GOOD_INSERT = {triple_quote}",
+            "INSERT INTO task_state (workspace_id, task_id, state)",
+            "VALUES (?, ?, ?)",
+            triple_quote,
+            "",
+        ]),
         encoding="utf-8",
     )
 
