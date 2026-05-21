@@ -1,4 +1,3 @@
-import pytest
 from src.agent.registry import AgentRegistry, AgentStatus
 
 
@@ -47,6 +46,41 @@ class TestAgentRegistry:
 
     def test_delete_nonexistent_agent(self):
         assert not self.registry.delete("nonexistent-id")
+
+    def test_list_hides_disabled_agents_by_default(self):
+        running = self.registry.register("agent-1", "worker.processor")
+        paused = self.registry.register("agent-2", "worker.processor")
+        stopped = self.registry.register("agent-3", "worker.processor")
+        failed = self.registry.register("agent-4", "worker.processor")
+        self.registry.update_status(running, AgentStatus.RUNNING)
+        self.registry.update_status(paused, AgentStatus.PAUSED)
+        self.registry.update_status(stopped, AgentStatus.STOPPED)
+        self.registry.update_status(failed, AgentStatus.FAILED)
+
+        listed_ids = {agent["id"] for agent in self.registry.list()}
+
+        assert listed_ids == {running}
+
+    def test_list_can_include_disabled_agents_for_admin_views(self):
+        running = self.registry.register("agent-1", "worker.processor")
+        stopped = self.registry.register("agent-2", "worker.processor")
+        self.registry.update_status(running, AgentStatus.RUNNING)
+        self.registry.update_status(stopped, AgentStatus.STOPPED)
+
+        listed_ids = {
+            agent["id"]
+            for agent in self.registry.list(include_disabled=True)
+        }
+
+        assert listed_ids == {running, stopped}
+
+    def test_explicit_status_filter_can_return_disabled_agents(self):
+        stopped = self.registry.register("agent-1", "worker.processor")
+        self.registry.update_status(stopped, AgentStatus.STOPPED)
+
+        agents = self.registry.list(status=AgentStatus.STOPPED)
+
+        assert [agent["id"] for agent in agents] == [stopped]
 
 # 2019-01-23T10:28:57 update
 
