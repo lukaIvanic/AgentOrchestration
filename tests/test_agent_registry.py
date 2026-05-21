@@ -1,5 +1,7 @@
-import pytest
 from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+
+import pytest
 
 from src.agent.registry import AgentRegistry, AgentStatus
 
@@ -99,6 +101,56 @@ class TestAgentRegistry:
             )
 
         assert self.registry.count() == 0
+
+    def test_concurrent_duplicate_alias_registration_is_serialized(self):
+        barrier = Barrier(2)
+
+        def register(name, alias):
+            barrier.wait()
+            try:
+                return (
+                    "ok",
+                    self.registry.register(
+                        name,
+                        "worker.processor",
+                        {"capability_aliases": [alias]},
+                    ),
+                )
+            except ValueError as exc:
+                return ("error", str(exc))
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(
+                pool.map(
+                    lambda args: register(*args),
+                    [
+                        ("agent-a", "Summarize.Text"),
+                        ("agent-b", " summarize.text "),
+                    ],
+                )
+            )
+
+        successes = [result for result in results if result[0] == "ok"]
+        errors = [result for result in results if result[0] == "error"]
+
+        assert len(successes) == 1
+        assert len(errors) == 1
+        assert "already registered" in errors[0][1]
+        assert self.registry.count() == 1
+
+        winning_agent_id = successes[0][1]
+        assert self.registry.update_status(
+            winning_agent_id,
+            AgentStatus.RUNNING,
+        )
+        assert (
+            self.registry.resolve_capability_alias("SUMMARIZE.TEXT")["id"]
+            == winning_agent_id
+        )
+        assert any(
+            event["event"] == "alias_rejected"
+            for event in self.registry.audit_events()
+        )
 
     def test_alias_resolution_defers_unavailable_agent_and_preserves_state(
         self,
