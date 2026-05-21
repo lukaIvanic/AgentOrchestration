@@ -1,22 +1,30 @@
 """API route definitions."""
 
-from fastapi import APIRouter, HTTPException, Depends
-from typing import List, Dict, Optional
+from fastapi import APIRouter, Header, HTTPException, Request
+from typing import Dict, Optional
 
 from src.agent import AgentRegistry, AgentStatus
+from src.api.artifacts import ArtifactUploadError, artifact_ingestion_service
 
 router = APIRouter()
 registry = AgentRegistry()
 
 
 @router.get("/agents")
-async def list_agents(status: Optional[str] = None, group: Optional[str] = None):
+async def list_agents(
+    status: Optional[str] = None,
+    group: Optional[str] = None,
+):
     status_filter = AgentStatus(status) if status else None
     return {"agents": registry.list(status=status_filter, group=group)}
 
 
 @router.post("/agents")
-async def register_agent(name: str, agent_type: str, config: Optional[Dict] = None):
+async def register_agent(
+    name: str,
+    agent_type: str,
+    config: Optional[Dict] = None,
+):
     agent_id = registry.register(name, agent_type, config)
     return {"agent_id": agent_id, "status": "registered"}
 
@@ -53,6 +61,60 @@ async def stop_agent(agent_id: str):
 @router.get("/agents/count")
 async def agent_count():
     return {"count": registry.count()}
+
+
+@router.post("/artifacts/{artifact_id}/upload")
+async def upload_artifact(
+    artifact_id: str,
+    request: Request,
+    tenant_id: str = "",
+    authorization: str = Header(default=""),
+    content_length: Optional[int] = Header(default=None),
+):
+    actor = authorization.removeprefix("Bearer ").strip()
+    try:
+        artifact_ingestion_service.validate_upload_request(
+            tenant_id=tenant_id,
+            artifact_id=artifact_id,
+            actor=actor,
+            declared_body_bytes=content_length,
+        )
+        return artifact_ingestion_service.upload(
+            tenant_id=tenant_id,
+            artifact_id=artifact_id,
+            body=await request.body(),
+            actor=actor,
+            declared_body_bytes=content_length,
+        )
+    except ArtifactUploadError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+@router.post("/workspaces/{workspace_id}/artifacts/{artifact_id}/upload")
+async def upload_workspace_artifact(
+    workspace_id: str,
+    artifact_id: str,
+    request: Request,
+    authorization: str = Header(default=""),
+    content_length: Optional[int] = Header(default=None),
+):
+    actor = authorization.removeprefix("Bearer ").strip()
+    try:
+        artifact_ingestion_service.validate_upload_request(
+            tenant_id=workspace_id,
+            artifact_id=artifact_id,
+            actor=actor,
+            declared_body_bytes=content_length,
+        )
+        return artifact_ingestion_service.upload(
+            tenant_id=workspace_id,
+            artifact_id=artifact_id,
+            body=await request.body(),
+            actor=actor,
+            declared_body_bytes=content_length,
+        )
+    except ArtifactUploadError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
 
 # 2019-03-18T11:10:18 update
 
