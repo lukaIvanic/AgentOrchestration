@@ -2,6 +2,7 @@ import inspect
 
 import pytest
 
+from scripts.check_task_state_scope import unsafe_task_state_queries
 from src.orchestrator.task_state import (
     ScopedTaskStateRepository,
     TaskStateScopeError,
@@ -92,3 +93,58 @@ def test_postgres_rls_policy_scopes_reads_and_writes():
     )
     assert using_clause in sql
     assert check_clause in sql
+
+
+def test_static_checker_requires_workspace_predicate(tmp_path):
+    unsafe = tmp_path / "unsafe_queries.py"
+    unsafe.write_text(
+        '''
+BAD_SELECT = """
+SELECT workspace_id, task_id
+FROM task_state
+WHERE task_id = ?
+"""
+
+BAD_UPDATE = """
+UPDATE task_state
+SET status = ?
+WHERE task_id = ?
+"""
+
+BAD_INSERT = """
+INSERT INTO task_state (task_id, status)
+VALUES (?, ?)
+"""
+''',
+        encoding="utf-8",
+    )
+    safe = tmp_path / "safe_queries.py"
+    safe.write_text(
+        '''
+GOOD_SELECT = """
+SELECT workspace_id, task_id
+FROM task_state
+WHERE workspace_id = ? AND task_id = ?
+"""
+
+GOOD_UPDATE = """
+UPDATE task_state
+SET status = ?
+WHERE workspace_id = ? AND task_id = ?
+"""
+
+GOOD_INSERT = """
+INSERT INTO task_state (workspace_id, task_id, status)
+VALUES (?, ?, ?)
+"""
+''',
+        encoding="utf-8",
+    )
+
+    failures = list(unsafe_task_state_queries(tmp_path))
+
+    assert [path.name for path, _ in failures] == [
+        "unsafe_queries.py",
+        "unsafe_queries.py",
+        "unsafe_queries.py",
+    ]
