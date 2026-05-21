@@ -57,9 +57,10 @@ class TemplateCloneService:
         workspace_id: str,
         template_id: str,
         authorization: str,
+        session_token: Optional[str],
         target_name: str,
     ) -> Dict:
-        principal = self._authorize(workspace_id, authorization)
+        principal = self._authorize(workspace_id, authorization, session_token)
 
         self.template_read_count += 1
         template = self.templates.get(f"{workspace_id}:{template_id}")
@@ -78,14 +79,15 @@ class TemplateCloneService:
             "definition": template,
         }
 
-    def _authorize(self, workspace_id: str, authorization: str) -> Principal:
-        if not authorization.startswith("Bearer "):
+    def _authorize(
+        self,
+        workspace_id: str,
+        authorization: str,
+        session_token: Optional[str],
+    ) -> Principal:
+        token = self._credential_token(authorization, session_token)
+        if token is None:
             self._audit("missing_auth", None, workspace_id)
-            raise TemplateCloneError(401, "Unauthorized")
-
-        token = authorization.removeprefix("Bearer ").strip()
-        if not token:
-            self._audit("blank_token", None, workspace_id)
             raise TemplateCloneError(401, "Unauthorized")
 
         principal = self.principals.get(token)
@@ -93,12 +95,14 @@ class TemplateCloneService:
             self._audit("unknown_token", None, workspace_id)
             raise TemplateCloneError(401, "Unauthorized")
         if principal.revoked or principal.disabled:
+            self.principals.pop(token, None)
             self._audit("inactive_principal", principal, workspace_id)
             raise TemplateCloneError(401, "Unauthorized")
         if (
             principal.expires_at is not None
             and principal.expires_at <= time.time()
         ):
+            self.principals.pop(token, None)
             self._audit("expired_principal", principal, workspace_id)
             raise TemplateCloneError(401, "Unauthorized")
         if principal.workspace_id != workspace_id:
@@ -113,6 +117,21 @@ class TemplateCloneService:
 
         self._audit("authorized", principal, workspace_id)
         return principal
+
+    def _credential_token(
+        self,
+        authorization: str,
+        session_token: Optional[str],
+    ) -> Optional[str]:
+        if authorization:
+            if not authorization.startswith("Bearer "):
+                return None
+            token = authorization.removeprefix("Bearer ").strip()
+            return token or None
+        if session_token is None:
+            return None
+        token = session_token.strip()
+        return token or None
 
     def _audit(
         self,

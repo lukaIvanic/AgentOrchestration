@@ -1,6 +1,6 @@
 """API route definitions."""
 
-from fastapi import APIRouter, Body, Header, HTTPException
+from fastapi import APIRouter, Body, Cookie, Header, HTTPException
 from typing import Dict, Optional
 
 from src.agent import AgentRegistry, AgentStatus
@@ -68,6 +68,7 @@ async def clone_template(
     workspace_id: str,
     template_id: str,
     authorization: str = Header(default=""),
+    ao_session: Optional[str] = Cookie(default=None, alias="ao_session"),
     payload: Optional[Dict] = Body(default=None),
 ):
     target_name = (payload or {}).get("name") or f"{template_id}-clone"
@@ -76,6 +77,7 @@ async def clone_template(
             workspace_id=workspace_id,
             template_id=template_id,
             authorization=authorization,
+            session_token=ao_session,
             target_name=target_name,
         )
     except TemplateCloneError as exc:

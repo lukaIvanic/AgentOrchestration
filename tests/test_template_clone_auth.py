@@ -40,6 +40,22 @@ class TestTemplateCloneAuth:
             "clone_created"
         )
 
+    def test_authorized_browser_session_can_clone_template(self):
+        self.client.cookies.set("ao_session", "good-token")
+
+        response = self.client.post(
+            "/api/v2/workspaces/workspace-1/templates/template-1/clone",
+            json={"name": "session-copy"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["name"] == "session-copy"
+        assert template_clone_service.template_read_count == 1
+        assert template_clone_service.clone_mutation_count == 1
+        assert template_clone_service.audit_events[-1]["decision"] == (
+            "clone_created"
+        )
+
     def test_unknown_token_fails_before_template_read_or_mutation(self):
         response = self.client.post(
             "/api/v2/workspaces/workspace-1/templates/template-1/clone",
@@ -103,6 +119,41 @@ class TestTemplateCloneAuth:
         assert template_clone_service.audit_events[-1]["decision"] == (
             "expired_principal"
         )
+        assert "expired-token" not in template_clone_service.principals
+
+    def test_expired_browser_session_fails_closed_and_is_invalidated(self):
+        template_clone_service.register_principal(
+            "expired-session",
+            Principal(
+                principal_id="user-7",
+                workspace_id="workspace-1",
+                role="admin",
+                scopes=["templates:clone"],
+                expires_at=time.time() - 1,
+            ),
+        )
+        self.client.cookies.set("ao_session", "expired-session")
+
+        response = self.client.post(
+            "/api/v2/workspaces/workspace-1/templates/template-1/clone",
+            json={"name": "copy"},
+        )
+        repeat = self.client.post(
+            "/api/v2/workspaces/workspace-1/templates/template-1/clone",
+            json={"name": "copy"},
+        )
+
+        assert response.status_code == 401
+        assert repeat.status_code == 401
+        assert template_clone_service.template_read_count == 0
+        assert template_clone_service.clone_mutation_count == 0
+        assert template_clone_service.audit_events[-2]["decision"] == (
+            "expired_principal"
+        )
+        assert template_clone_service.audit_events[-1]["decision"] == (
+            "unknown_token"
+        )
+        assert "expired-session" not in template_clone_service.principals
 
     def test_wrong_workspace_fails_before_template_read_or_mutation(self):
         template_clone_service.register_principal(
@@ -175,3 +226,27 @@ class TestTemplateCloneAuth:
         assert template_clone_service.audit_events[-1]["decision"] == (
             "insufficient_role"
         )
+
+    def test_blank_browser_session_fails_before_read_or_mutation(self):
+        self.client.cookies.set("ao_session", " ")
+
+        response = self.client.post(
+            "/api/v2/workspaces/workspace-1/templates/template-1/clone",
+            json={"name": "copy"},
+        )
+
+        assert response.status_code == 401
+        assert template_clone_service.template_read_count == 0
+        assert template_clone_service.clone_mutation_count == 0
+        assert template_clone_service.audit_events[-1]["decision"] == (
+            "missing_auth"
+        )
+
+    def test_browser_session_cookie_does_not_bypass_other_api_auth(self):
+        self.client.cookies.set("ao_session", "good-token")
+
+        response = self.client.get("/api/v2/agents")
+
+        assert response.status_code == 401
+        assert template_clone_service.template_read_count == 0
+        assert template_clone_service.clone_mutation_count == 0
