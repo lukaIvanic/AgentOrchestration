@@ -28,17 +28,31 @@ class TestMetricsCollector:
 
     def test_histogram_samples_are_bounded(self):
         metrics = MetricsCollector(histogram_sample_limit=3)
-        for value in range(10):
+        for value in range(10000):
             metrics.observe("queue.latency", float(value))
 
         histogram = metrics.snapshot()["histograms"]["queue.latency"]
-        assert histogram["count"] == 10
-        assert histogram["sum"] == 45.0
-        assert histogram["avg"] == 4.5
+        assert histogram["count"] == 10000
+        assert histogram["sum"] == 49995000.0
+        assert histogram["avg"] == 4999.5
         assert histogram["min"] == 0.0
-        assert histogram["max"] == 9.0
-        assert histogram["samples"] == [7.0, 8.0, 9.0]
+        assert histogram["max"] == 9999.0
+        assert histogram["samples"] == [9997.0, 9998.0, 9999.0]
         assert histogram["sample_limit"] == 3
+
+    def test_histogram_snapshot_samples_are_isolated(self):
+        metrics = MetricsCollector(histogram_sample_limit=2)
+        metrics.observe("response.time", 1.0)
+        metrics.observe("response.time", 2.0)
+
+        snapshot = metrics.snapshot()
+        snapshot["histograms"]["response.time"]["samples"].append(999.0)
+
+        fresh_snapshot = metrics.snapshot()
+        assert fresh_snapshot["histograms"]["response.time"]["samples"] == [
+            1.0,
+            2.0,
+        ]
 
     def test_histogram_sample_limit_rejects_negative_values(self):
         with pytest.raises(ValueError):
