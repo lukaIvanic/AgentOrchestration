@@ -1,22 +1,30 @@
 """API route definitions."""
 
-from fastapi import APIRouter, HTTPException, Depends
-from typing import List, Dict, Optional
+from fastapi import APIRouter, Body, Header, HTTPException
+from typing import Dict, Optional
 
 from src.agent import AgentRegistry, AgentStatus
+from src.api.templates import TemplateCloneError, template_clone_service
 
 router = APIRouter()
 registry = AgentRegistry()
 
 
 @router.get("/agents")
-async def list_agents(status: Optional[str] = None, group: Optional[str] = None):
+async def list_agents(
+    status: Optional[str] = None,
+    group: Optional[str] = None,
+):
     status_filter = AgentStatus(status) if status else None
     return {"agents": registry.list(status=status_filter, group=group)}
 
 
 @router.post("/agents")
-async def register_agent(name: str, agent_type: str, config: Optional[Dict] = None):
+async def register_agent(
+    name: str,
+    agent_type: str,
+    config: Optional[Dict] = None,
+):
     agent_id = registry.register(name, agent_type, config)
     return {"agent_id": agent_id, "status": "registered"}
 
@@ -53,6 +61,25 @@ async def stop_agent(agent_id: str):
 @router.get("/agents/count")
 async def agent_count():
     return {"count": registry.count()}
+
+
+@router.post("/workspaces/{workspace_id}/templates/{template_id}/clone")
+async def clone_template(
+    workspace_id: str,
+    template_id: str,
+    authorization: str = Header(default=""),
+    payload: Optional[Dict] = Body(default=None),
+):
+    target_name = (payload or {}).get("name") or f"{template_id}-clone"
+    try:
+        return template_clone_service.clone(
+            workspace_id=workspace_id,
+            template_id=template_id,
+            authorization=authorization,
+            target_name=target_name,
+        )
+    except TemplateCloneError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
 
 # 2019-03-18T11:10:18 update
 
