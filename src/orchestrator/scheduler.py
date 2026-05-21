@@ -128,13 +128,16 @@ class TaskScheduler:
     def fail(self, task_id: str, queue: str = "default") -> bool:
         task = self._in_flight.pop(task_id, None)
         if task:
-            if not self._parent_allows_retry(task):
+            retry_block_reason = self._retry_block_reason(task)
+            if retry_block_reason:
                 self._set_lifecycle(task_id, TaskLifecycle.CANCELED)
                 self._record_audit(
                     "child_retry_rejected",
                     task_id=task_id,
                     parent_id=task.get("parent_id"),
-                    reason="parent_cancel_or_stale_transition",
+                    reason=retry_block_reason,
+                    task_attempt=task.get("attempt"),
+                    task_revision=task.get("revision"),
                 )
                 return False
 
@@ -182,16 +185,16 @@ class TaskScheduler:
         )
         state["lifecycle"] = lifecycle.value
 
-    def _parent_allows_retry(self, task: Dict) -> bool:
+    def _retry_block_reason(self, task: Dict) -> Optional[str]:
         parent_id = task.get("parent_id")
         if not parent_id:
-            return True
+            return None
 
         parent_state = self._task_state.get(parent_id)
         if parent_state is None:
-            return False
+            return "missing_parent_state"
         if parent_state.get("lifecycle") == TaskLifecycle.CANCELED.value:
-            return False
+            return "parent_canceled"
 
         expected_attempt = task.get("parent_attempt")
         expected_revision = task.get("parent_revision")
@@ -199,16 +202,22 @@ class TaskScheduler:
             expected_attempt is not None
             and expected_attempt != parent_state.get("attempt", 0)
         ):
-            return False
+            return "stale_parent_attempt"
         if (
             expected_revision is not None
             and expected_revision != parent_state.get("revision", 0)
         ):
-            return False
-        return True
+            return "stale_parent_revision"
+        return None
 
     def _record_audit(self, event: str, **metadata: Any) -> None:
-        allowed = {"task_id", "parent_id", "reason"}
+        allowed = {
+            "task_id",
+            "parent_id",
+            "reason",
+            "task_attempt",
+            "task_revision",
+        }
         sanitized = {
             key: value
             for key, value in metadata.items()

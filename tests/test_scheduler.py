@@ -46,6 +46,7 @@ class TestTaskScheduler:
         parent_state = self.scheduler.get_task_state(parent_id)
         child_id = self.scheduler.enqueue({
             "type": "child",
+            "payload": {"token": "do-not-audit"},
             "parent_id": parent_id,
             "parent_attempt": parent_state["attempt"],
             "parent_revision": parent_state["revision"] - 1,
@@ -65,8 +66,11 @@ class TestTaskScheduler:
             "event": "child_retry_rejected",
             "task_id": child_id,
             "parent_id": parent_id,
-            "reason": "parent_cancel_or_stale_transition",
+            "reason": "parent_canceled",
+            "task_attempt": 0,
+            "task_revision": 0,
         }
+        assert "payload" not in self.scheduler.audit_events()[-1]
 
     def test_child_retry_rejected_on_stale_parent_revision(self):
         import asyncio
@@ -85,9 +89,30 @@ class TestTaskScheduler:
 
         assert child["id"] == child_id
         assert not self.scheduler.fail(child_id)
+        assert self.scheduler.audit_events()[-1]["reason"] == (
+            "stale_parent_revision"
+        )
         assert (
             self.scheduler.get_task_state(parent_id)["lifecycle"]
             == "completed"
+        )
+        assert (
+            self.scheduler.get_task_state(child_id)["lifecycle"] == "canceled"
+        )
+
+    def test_child_retry_rejected_when_parent_state_is_missing(self):
+        import asyncio
+
+        child_id = self.scheduler.enqueue({
+            "type": "child",
+            "parent_id": "missing-parent",
+        })
+        child = asyncio.run(self.scheduler.dequeue())
+
+        assert child["id"] == child_id
+        assert not self.scheduler.fail(child_id)
+        assert self.scheduler.audit_events()[-1]["reason"] == (
+            "missing_parent_state"
         )
         assert (
             self.scheduler.get_task_state(child_id)["lifecycle"] == "canceled"
