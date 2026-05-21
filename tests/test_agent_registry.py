@@ -1,4 +1,6 @@
 import pytest
+from concurrent.futures import ThreadPoolExecutor
+
 from src.agent.registry import AgentRegistry, AgentStatus
 
 
@@ -88,6 +90,16 @@ class TestAgentRegistry:
 
         assert self.registry.count() == 0
 
+    def test_blank_aliases_are_rejected(self):
+        with pytest.raises(ValueError, match="cannot be blank"):
+            self.registry.register(
+                "test-agent",
+                "worker.processor",
+                {"capability_aliases": ["   "]},
+            )
+
+        assert self.registry.count() == 0
+
     def test_alias_resolution_defers_unavailable_agent_and_preserves_state(
         self,
     ):
@@ -127,6 +139,78 @@ class TestAgentRegistry:
         assert (
             self.registry.resolve_capability_alias("SUMMARIZE.TEXT")["id"]
             == replacement_id
+        )
+
+    def test_alias_resolution_is_safe_during_lifecycle_changes(self):
+        agent_id = self.registry.register(
+            "test-agent",
+            "worker.processor",
+            {"capability_aliases": ["Summarize.Text"]},
+        )
+        self.registry.update_status(agent_id, AgentStatus.RUNNING)
+        errors = []
+
+        def toggle_status():
+            for _ in range(75):
+                self.registry.update_status(agent_id, AgentStatus.PAUSED)
+                self.registry.update_status(agent_id, AgentStatus.RUNNING)
+
+        def resolve_alias():
+            for _ in range(150):
+                try:
+                    self.registry.resolve_capability_alias(" summarize.TEXT ")
+                except Exception as exc:
+                    errors.append(exc)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(toggle_status),
+                executor.submit(resolve_alias),
+            ]
+            for future in futures:
+                future.result()
+
+        self.registry.update_status(agent_id, AgentStatus.STOPPED)
+
+        assert errors == []
+        assert self.registry.resolve_capability_alias("summarize.text") is None
+        assert self.registry.get(agent_id)["status"] == "stopped"
+
+    def test_concurrent_duplicate_alias_registration_is_atomic(self):
+        results = []
+
+        def register(alias):
+            try:
+                return self.registry.register(
+                    f"agent-{alias}",
+                    "worker.processor",
+                    {"capability_aliases": [alias]},
+                )
+            except ValueError as exc:
+                return str(exc)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(register, "Summarize.Text"),
+                executor.submit(register, " summarize.text "),
+            ]
+            for future in futures:
+                results.append(future.result())
+
+        winners = [
+            result for result in results if "already registered" not in result
+        ]
+        rejects = [
+            result for result in results if "already registered" in result
+        ]
+
+        assert len(winners) == 1
+        assert len(rejects) == 1
+        assert self.registry.count() == 1
+        self.registry.update_status(winners[0], AgentStatus.RUNNING)
+        assert (
+            self.registry.resolve_capability_alias("SUMMARIZE.TEXT")["id"]
+            == winners[0]
         )
 
 # 2019-01-23T10:28:57 update

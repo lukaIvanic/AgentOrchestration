@@ -3,6 +3,7 @@
 import time
 import uuid
 from enum import Enum
+from threading import RLock
 from typing import Any, Dict, List, Optional, Set
 
 
@@ -24,6 +25,7 @@ class AgentRegistry:
 
     def __init__(self, storage_backend: str = "memory"):
         self.storage_backend = storage_backend
+        self._lock = RLock()
         self._agents: Dict[str, Dict[str, Any]] = {}
         self._index: Dict[str, List[str]] = {}
         self._alias_index: Dict[str, str] = {}
@@ -36,112 +38,122 @@ class AgentRegistry:
         agent_type: str,
         config: Optional[Dict] = None,
     ) -> str:
-        config = dict(config or {})
-        aliases = self._normalize_aliases(config.get("capability_aliases", []))
-        self._ensure_aliases_available(aliases)
-        agent_id = str(uuid.uuid4())
-        timestamp = time.time()
-        self._agents[agent_id] = {
-            "id": agent_id,
-            "name": name,
-            "type": agent_type,
-            "status": AgentStatus.PENDING.value,
-            "config": config,
-            "capability_aliases": sorted(aliases),
-            "created_at": timestamp,
-            "updated_at": timestamp,
-            "version": "1.0.0",
-            "metrics": {"tasks_completed": 0, "errors": 0, "uptime": 0},
-        }
-        group = agent_type.split(".")[0]
-        if group not in self._index:
-            self._index[group] = []
-        self._index[group].append(agent_id)
-        for alias in aliases:
-            self._alias_index[alias] = agent_id
-            self._alias_cache.pop(alias, None)
-        if aliases:
-            self._audit(
-                "aliases_registered",
-                agent_id,
-                aliases=sorted(aliases),
+        with self._lock:
+            config = dict(config or {})
+            aliases = self._normalize_aliases(
+                config.get("capability_aliases", [])
             )
-        return agent_id
+            self._ensure_aliases_available(aliases)
+            agent_id = str(uuid.uuid4())
+            timestamp = time.time()
+            self._agents[agent_id] = {
+                "id": agent_id,
+                "name": name,
+                "type": agent_type,
+                "status": AgentStatus.PENDING.value,
+                "config": config,
+                "capability_aliases": sorted(aliases),
+                "created_at": timestamp,
+                "updated_at": timestamp,
+                "version": "1.0.0",
+                "metrics": {"tasks_completed": 0, "errors": 0, "uptime": 0},
+            }
+            group = agent_type.split(".")[0]
+            if group not in self._index:
+                self._index[group] = []
+            self._index[group].append(agent_id)
+            for alias in aliases:
+                self._alias_index[alias] = agent_id
+                self._alias_cache.pop(alias, None)
+            if aliases:
+                self._audit(
+                    "aliases_registered",
+                    agent_id,
+                    aliases=sorted(aliases),
+                )
+            return agent_id
 
     def get(self, agent_id: str) -> Optional[Dict[str, Any]]:
-        return self._agents.get(agent_id)
+        with self._lock:
+            return self._agents.get(agent_id)
 
     def list(
         self,
         status: Optional[AgentStatus] = None,
         group: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        agents = self._agents.values()
-        if status:
-            agents = [a for a in agents if a["status"] == status.value]
-        if group:
-            agent_ids = self._index.get(group, [])
-            agents = [a for a in agents if a["id"] in agent_ids]
-        return list(agents)
+        with self._lock:
+            agents = self._agents.values()
+            if status:
+                agents = [a for a in agents if a["status"] == status.value]
+            if group:
+                agent_ids = self._index.get(group, [])
+                agents = [a for a in agents if a["id"] in agent_ids]
+            return list(agents)
 
     def update_status(self, agent_id: str, status: AgentStatus) -> bool:
-        if agent_id not in self._agents:
-            return False
-        self._agents[agent_id]["status"] = status.value
-        self._agents[agent_id]["updated_at"] = time.time()
-        self._invalidate_alias_cache(agent_id)
-        self._audit("status_changed", agent_id, status=status.value)
-        return True
+        with self._lock:
+            if agent_id not in self._agents:
+                return False
+            self._agents[agent_id]["status"] = status.value
+            self._agents[agent_id]["updated_at"] = time.time()
+            self._invalidate_alias_cache(agent_id)
+            self._audit("status_changed", agent_id, status=status.value)
+            return True
 
     def delete(self, agent_id: str) -> bool:
-        if agent_id not in self._agents:
-            return False
-        agent = self._agents.pop(agent_id)
-        group = agent["type"].split(".")[0]
-        if group in self._index and agent_id in self._index[group]:
-            self._index[group].remove(agent_id)
-        for alias in agent.get("capability_aliases", []):
-            if self._alias_index.get(alias) == agent_id:
-                self._alias_index.pop(alias, None)
-            self._alias_cache.pop(alias, None)
-        self._audit("agent_deleted", agent_id)
-        return True
+        with self._lock:
+            if agent_id not in self._agents:
+                return False
+            agent = self._agents.pop(agent_id)
+            group = agent["type"].split(".")[0]
+            if group in self._index and agent_id in self._index[group]:
+                self._index[group].remove(agent_id)
+            for alias in agent.get("capability_aliases", []):
+                if self._alias_index.get(alias) == agent_id:
+                    self._alias_index.pop(alias, None)
+                self._alias_cache.pop(alias, None)
+            self._audit("agent_deleted", agent_id)
+            return True
 
     def count(self) -> int:
-        return len(self._agents)
+        with self._lock:
+            return len(self._agents)
 
     def resolve_capability_alias(self, alias: str) -> Optional[Dict[str, Any]]:
         normalized = self._normalize_alias(alias)
-        if normalized in self._alias_cache:
-            agent_id = self._alias_cache[normalized]
-        else:
-            agent_id = self._alias_index.get(normalized)
-            self._alias_cache[normalized] = agent_id
+        with self._lock:
+            if normalized in self._alias_cache:
+                agent_id = self._alias_cache[normalized]
+            else:
+                agent_id = self._alias_index.get(normalized)
+                self._alias_cache[normalized] = agent_id
 
-        if not agent_id:
-            self._audit("alias_missing", None, alias=normalized)
-            return None
+            if not agent_id:
+                self._audit("alias_missing", None, alias=normalized)
+                return None
 
-        agent = self._agents.get(agent_id)
-        if not agent:
-            self._alias_cache.pop(normalized, None)
-            self._audit("alias_stale", agent_id, alias=normalized)
-            return None
+            agent = self._agents.get(agent_id)
+            if not agent:
+                self._alias_cache.pop(normalized, None)
+                self._audit("alias_stale", agent_id, alias=normalized)
+                return None
 
-        if agent["status"] != AgentStatus.RUNNING.value:
-            self._audit(
-                "alias_deferred",
-                agent_id,
-                alias=normalized,
-                status=agent["status"],
-            )
-            return None
+            if agent["status"] != AgentStatus.RUNNING.value:
+                self._audit(
+                    "alias_deferred",
+                    agent_id,
+                    alias=normalized,
+                    status=agent["status"],
+                )
+                return None
 
-        self._audit("alias_resolved", agent_id, alias=normalized)
-        return agent
+            self._audit("alias_resolved", agent_id, alias=normalized)
+            return agent
 
     def audit_events(self) -> List[Dict[str, Any]]:
-        return list(self._audit_events)
+        with self._lock:
+            return list(self._audit_events)
 
     def _ensure_aliases_available(self, aliases: Set[str]) -> None:
         for alias in aliases:
@@ -163,6 +175,9 @@ class AgentRegistry:
     def _normalize_aliases(self, aliases: List[str]) -> Set[str]:
         normalized = [self._normalize_alias(alias) for alias in aliases]
         clean_aliases = [alias for alias in normalized if alias]
+        if len(clean_aliases) != len(normalized):
+            self._audit("alias_rejected", None, reason="blank")
+            raise ValueError("Capability aliases cannot be blank")
         if len(clean_aliases) != len(set(clean_aliases)):
             self._audit("alias_rejected", None, reason="duplicate")
             raise ValueError("Duplicate capability aliases are not allowed")
