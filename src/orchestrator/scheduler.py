@@ -1,10 +1,18 @@
 """Task Scheduler — Priority-based task queuing and dispatch."""
 
-import asyncio
 import heapq
 import time
-from typing import Any, Dict, Optional
+from enum import Enum
+from typing import Any, Dict, List, Optional
 from uuid import uuid4
+
+
+class TaskLifecycle(Enum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELED = "canceled"
 
 
 class PriorityQueue:
@@ -35,26 +43,66 @@ class TaskScheduler:
         self._queues: Dict[str, PriorityQueue] = {}
         self._scheduled: Dict[str, float] = {}
         self._in_flight: Dict[str, Dict] = {}
+        self._task_state: Dict[str, Dict[str, Any]] = {}
+        self._audit_events: List[Dict[str, Any]] = []
         self._max_retries = 3
 
-    def enqueue(self, task: Dict, queue: str = "default", priority: int = 0) -> str:
+    def enqueue(
+        self,
+        task: Dict,
+        queue: str = "default",
+        priority: int = 0,
+    ) -> str:
         task_id = str(uuid4())
         task["id"] = task_id
         task["enqueued_at"] = time.time()
         task["retries"] = 0
+        task["attempt"] = task.get("attempt", 0)
+        task["revision"] = task.get("revision", 0)
 
+        self._task_state[task_id] = {
+            "lifecycle": TaskLifecycle.QUEUED.value,
+            "attempt": task["attempt"],
+            "revision": task["revision"],
+        }
+        self._push_task(task, queue, priority)
+        return task_id
+
+    def _push_task(
+        self,
+        task: Dict,
+        queue: str = "default",
+        priority: int = 0,
+    ) -> None:
         if queue not in self._queues:
             self._queues[queue] = PriorityQueue()
         self._queues[queue].push(task, priority)
-        return task_id
 
-    def schedule(self, task: Dict, delay: float, queue: str = "default", priority: int = 0) -> str:
+    def schedule(
+        self,
+        task: Dict,
+        delay: float,
+        queue: str = "default",
+        priority: int = 0,
+    ) -> str:
         task_id = str(uuid4())
         task["id"] = task_id
+        task["retries"] = 0
+        task["attempt"] = task.get("attempt", 0)
+        task["revision"] = task.get("revision", 0)
         self._scheduled[task_id] = time.time() + delay
+        self._task_state[task_id] = {
+            "lifecycle": TaskLifecycle.QUEUED.value,
+            "attempt": task["attempt"],
+            "revision": task["revision"],
+        }
         return task_id
 
-    async def dequeue(self, queue: str = "default", timeout: float = 1.0) -> Optional[Dict]:
+    async def dequeue(
+        self,
+        queue: str = "default",
+        timeout: float = 1.0,
+    ) -> Optional[Dict]:
         now = time.time()
         expired = [tid for tid, t in self._scheduled.items() if t <= now]
         for tid in expired:
@@ -66,20 +114,108 @@ class TaskScheduler:
             task = self._queues[queue].pop()
             if task:
                 self._in_flight[task["id"]] = task
+                self._set_lifecycle(task["id"], TaskLifecycle.RUNNING)
                 return task
         return None
 
     def complete(self, task_id: str) -> bool:
-        return self._in_flight.pop(task_id, None) is not None
+        task = self._in_flight.pop(task_id, None)
+        if task is None:
+            return False
+        self._set_lifecycle(task_id, TaskLifecycle.COMPLETED)
+        return True
 
     def fail(self, task_id: str, queue: str = "default") -> bool:
         task = self._in_flight.pop(task_id, None)
         if task:
+            if not self._parent_allows_retry(task):
+                self._set_lifecycle(task_id, TaskLifecycle.CANCELED)
+                self._record_audit(
+                    "child_retry_rejected",
+                    task_id=task_id,
+                    parent_id=task.get("parent_id"),
+                    reason="parent_cancel_or_stale_transition",
+                )
+                return False
+
             task["retries"] += 1
             if task["retries"] < self._max_retries:
-                self.enqueue(task, queue, priority=task.get("priority", 0))
+                task["attempt"] = task.get("attempt", 0) + 1
+                task["revision"] = task.get("revision", 0) + 1
+                task["enqueued_at"] = time.time()
+                self._task_state[task_id] = {
+                    "lifecycle": TaskLifecycle.QUEUED.value,
+                    "attempt": task["attempt"],
+                    "revision": task["revision"],
+                }
+                self._push_task(task, queue, priority=task.get("priority", 0))
                 return True
+            self._set_lifecycle(task_id, TaskLifecycle.FAILED)
         return False
+
+    def cancel(self, task_id: str) -> bool:
+        state = self._task_state.get(task_id)
+        if state is None:
+            return False
+
+        state["lifecycle"] = TaskLifecycle.CANCELED.value
+        state["revision"] = state.get("revision", 0) + 1
+        self._in_flight.pop(task_id, None)
+        self._record_audit(
+            "task_canceled",
+            task_id=task_id,
+            reason="explicit_cancel",
+        )
+        return True
+
+    def get_task_state(self, task_id: str) -> Optional[Dict[str, Any]]:
+        state = self._task_state.get(task_id)
+        return dict(state) if state else None
+
+    def audit_events(self) -> List[Dict[str, Any]]:
+        return [dict(event) for event in self._audit_events]
+
+    def _set_lifecycle(self, task_id: str, lifecycle: TaskLifecycle) -> None:
+        state = self._task_state.setdefault(
+            task_id,
+            {"attempt": 0, "revision": 0},
+        )
+        state["lifecycle"] = lifecycle.value
+
+    def _parent_allows_retry(self, task: Dict) -> bool:
+        parent_id = task.get("parent_id")
+        if not parent_id:
+            return True
+
+        parent_state = self._task_state.get(parent_id)
+        if parent_state is None:
+            return False
+        if parent_state.get("lifecycle") == TaskLifecycle.CANCELED.value:
+            return False
+
+        expected_attempt = task.get("parent_attempt")
+        expected_revision = task.get("parent_revision")
+        if (
+            expected_attempt is not None
+            and expected_attempt != parent_state.get("attempt", 0)
+        ):
+            return False
+        if (
+            expected_revision is not None
+            and expected_revision != parent_state.get("revision", 0)
+        ):
+            return False
+        return True
+
+    def _record_audit(self, event: str, **metadata: Any) -> None:
+        allowed = {"task_id", "parent_id", "reason"}
+        sanitized = {
+            key: value
+            for key, value in metadata.items()
+            if key in allowed and value is not None
+        }
+        self._audit_events.append({"event": event, **sanitized})
+        self._audit_events = self._audit_events[-100:]
 
 # 2019-04-25T08:37:12 update
 
