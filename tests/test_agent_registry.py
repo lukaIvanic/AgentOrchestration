@@ -86,6 +86,34 @@ class TestAgentRegistry:
         handler = self.registry.resolve_handler("worker.processor")
         assert handler["id"] == second
 
+    def test_resolution_cache_is_invalidated_on_status_changes(self):
+        first = self.registry.register("agent-1", "worker.processor")
+        second = self.registry.register("agent-2", "worker.processor")
+        self.registry.update_status(first, AgentStatus.RUNNING)
+        self.registry.update_status(second, AgentStatus.RUNNING)
+
+        assert self.registry.resolve_handler("worker.processor")["id"] == first
+
+        self.registry.update_status(first, AgentStatus.STOPPED)
+
+        handler = self.registry.resolve_handler("worker.processor")
+        assert handler["id"] == second
+        assert self.registry.routing_audit[-2]["decision"] == "deferred"
+        assert self.registry.routing_audit[-2]["status"] == "stopped"
+
+    def test_resolution_cache_is_invalidated_on_delete(self):
+        first = self.registry.register("agent-1", "worker.processor")
+        second = self.registry.register("agent-2", "worker.processor")
+        self.registry.update_status(first, AgentStatus.RUNNING)
+        self.registry.update_status(second, AgentStatus.RUNNING)
+
+        assert self.registry.resolve_handler("worker.processor")["id"] == first
+
+        self.registry.delete(first)
+
+        handler = self.registry.resolve_handler("worker.processor")
+        assert handler["id"] == second
+
     def test_resolve_handler_respects_required_capability(self):
         self.registry.register(
             "agent-1",
