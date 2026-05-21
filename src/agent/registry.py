@@ -1,6 +1,5 @@
 """Agent Registry — Manages agent lifecycle and metadata."""
 
-import json
 import time
 import uuid
 from enum import Enum
@@ -21,31 +20,51 @@ class AgentRegistry:
         self.storage_backend = storage_backend
         self._agents: Dict[str, Dict[str, Any]] = {}
         self._index: Dict[str, List[str]] = {}
+        self._route_cache: Dict[str, str] = {}
+        self.routing_audit: List[Dict[str, Any]] = []
 
-    def register(self, name: str, agent_type: str, config: Optional[Dict] = None) -> str:
+    def register(
+        self,
+        name: str,
+        agent_type: str,
+        config: Optional[Dict] = None,
+    ) -> str:
         agent_id = str(uuid.uuid4())
         timestamp = time.time()
+        config = config or {}
         self._agents[agent_id] = {
             "id": agent_id,
             "name": name,
             "type": agent_type,
             "status": AgentStatus.PENDING.value,
-            "config": config or {},
+            "config": config,
             "created_at": timestamp,
             "updated_at": timestamp,
             "version": "1.0.0",
+            "capabilities": list(config.get("capabilities", [])),
+            "health": {
+                "healthy": bool(config.get("healthy", True)),
+                "accepting_tasks": bool(config.get("accepting_tasks", True)),
+                "reason": config.get("health_reason", ""),
+                "checked_at": timestamp,
+            },
             "metrics": {"tasks_completed": 0, "errors": 0, "uptime": 0},
         }
         group = agent_type.split(".")[0]
         if group not in self._index:
             self._index[group] = []
         self._index[group].append(agent_id)
+        self._invalidate_route_cache()
         return agent_id
 
     def get(self, agent_id: str) -> Optional[Dict[str, Any]]:
         return self._agents.get(agent_id)
 
-    def list(self, status: Optional[AgentStatus] = None, group: Optional[str] = None) -> List[Dict[str, Any]]:
+    def list(
+        self,
+        status: Optional[AgentStatus] = None,
+        group: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         agents = self._agents.values()
         if status:
             agents = [a for a in agents if a["status"] == status.value]
@@ -59,7 +78,76 @@ class AgentRegistry:
             return False
         self._agents[agent_id]["status"] = status.value
         self._agents[agent_id]["updated_at"] = time.time()
+        self._invalidate_route_cache()
         return True
+
+    def update_health(
+        self,
+        agent_id: str,
+        healthy: bool,
+        accepting_tasks: bool = True,
+        reason: str = "",
+    ) -> bool:
+        if agent_id not in self._agents:
+            return False
+        self._agents[agent_id]["health"] = {
+            "healthy": bool(healthy),
+            "accepting_tasks": bool(accepting_tasks),
+            "reason": reason,
+            "checked_at": time.time(),
+        }
+        self._agents[agent_id]["updated_at"] = time.time()
+        self._invalidate_route_cache()
+        return True
+
+    def resolve_handler(
+        self,
+        agent_type: str,
+        required_capability: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        cache_key = f"{agent_type}:{required_capability or ''}"
+        cached_id = self._route_cache.get(cache_key)
+        if cached_id:
+            agent = self._agents.get(cached_id)
+            if agent and self._is_routable(agent, required_capability):
+                self._audit_route("cache_hit", agent, required_capability)
+                return agent
+            self._route_cache.pop(cache_key, None)
+
+        for agent in self._agents.values():
+            if agent["type"] != agent_type:
+                continue
+            if self._is_routable(agent, required_capability):
+                self._route_cache[cache_key] = agent["id"]
+                self._audit_route("selected", agent, required_capability)
+                return agent
+            self._audit_route("deferred", agent, required_capability)
+
+        self.routing_audit.append({
+            "decision": "missing",
+            "agent_type": agent_type,
+            "required_capability": required_capability,
+        })
+        return None
+
+    def resolve_target_handler(
+        self,
+        agent_id: str,
+        required_capability: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        agent = self._agents.get(agent_id)
+        if not agent:
+            self.routing_audit.append({
+                "decision": "missing",
+                "agent_id": agent_id,
+                "required_capability": required_capability,
+            })
+            return None
+        if not self._is_routable(agent, required_capability):
+            self._audit_route("deferred", agent, required_capability)
+            return None
+        self._audit_route("selected", agent, required_capability)
+        return agent
 
     def delete(self, agent_id: str) -> bool:
         if agent_id not in self._agents:
@@ -68,10 +156,47 @@ class AgentRegistry:
         group = agent["type"].split(".")[0]
         if group in self._index and agent_id in self._index[group]:
             self._index[group].remove(agent_id)
+        self._invalidate_route_cache()
         return True
 
     def count(self) -> int:
         return len(self._agents)
+
+    def _is_routable(
+        self,
+        agent: Dict[str, Any],
+        required_capability: Optional[str],
+    ) -> bool:
+        health = agent.get("health", {})
+        return (
+            agent["status"] == AgentStatus.RUNNING.value
+            and health.get("healthy") is True
+            and health.get("accepting_tasks") is True
+            and (
+                required_capability is None
+                or required_capability in agent.get("capabilities", [])
+            )
+        )
+
+    def _audit_route(
+        self,
+        decision: str,
+        agent: Dict[str, Any],
+        required_capability: Optional[str],
+    ) -> None:
+        health = agent.get("health", {})
+        self.routing_audit.append({
+            "decision": decision,
+            "agent_id": agent["id"],
+            "agent_type": agent["type"],
+            "status": agent["status"],
+            "healthy": health.get("healthy"),
+            "accepting_tasks": health.get("accepting_tasks"),
+            "required_capability": required_capability,
+        })
+
+    def _invalidate_route_cache(self) -> None:
+        self._route_cache.clear()
 
 # 2019-01-29T11:24:49 update
 

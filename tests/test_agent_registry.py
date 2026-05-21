@@ -1,4 +1,3 @@
-import pytest
 from src.agent.registry import AgentRegistry, AgentStatus
 
 
@@ -47,6 +46,91 @@ class TestAgentRegistry:
 
     def test_delete_nonexistent_agent(self):
         assert not self.registry.delete("nonexistent-id")
+
+    def test_resolve_handler_requires_running_healthy_agent(self):
+        agent_id = self.registry.register("agent-1", "worker.processor")
+
+        assert self.registry.resolve_handler("worker.processor") is None
+
+        self.registry.update_status(agent_id, AgentStatus.RUNNING)
+        handler = self.registry.resolve_handler("worker.processor")
+        assert handler["id"] == agent_id
+
+        self.registry.update_health(
+            agent_id,
+            healthy=False,
+            accepting_tasks=False,
+            reason="rolling_deploy",
+        )
+
+        assert self.registry.resolve_handler("worker.processor") is None
+        assert self.registry.routing_audit[-2]["decision"] == "deferred"
+        assert self.registry.routing_audit[-2]["healthy"] is False
+        assert "config" not in self.registry.routing_audit[-2]
+
+    def test_resolution_cache_is_invalidated_on_health_changes(self):
+        first = self.registry.register("agent-1", "worker.processor")
+        second = self.registry.register("agent-2", "worker.processor")
+        self.registry.update_status(first, AgentStatus.RUNNING)
+        self.registry.update_status(second, AgentStatus.RUNNING)
+
+        assert self.registry.resolve_handler("worker.processor")["id"] == first
+
+        self.registry.update_health(
+            first,
+            healthy=True,
+            accepting_tasks=False,
+            reason="draining",
+        )
+
+        handler = self.registry.resolve_handler("worker.processor")
+        assert handler["id"] == second
+
+    def test_resolve_handler_respects_required_capability(self):
+        self.registry.register(
+            "agent-1",
+            "worker.processor",
+            {"capabilities": ["summarize"]},
+        )
+        specialized = self.registry.register(
+            "agent-2",
+            "worker.processor",
+            {"capabilities": ["translate"]},
+        )
+        for agent in self.registry.list():
+            self.registry.update_status(agent["id"], AgentStatus.RUNNING)
+
+        handler = self.registry.resolve_handler(
+            "worker.processor",
+            required_capability="translate",
+        )
+
+        assert handler["id"] == specialized
+
+    def test_resolve_target_handler_rejects_unhealthy_exact_target(self):
+        agent_id = self.registry.register(
+            "agent-1",
+            "worker.processor",
+            {"capabilities": ["summarize"]},
+        )
+        self.registry.update_status(agent_id, AgentStatus.RUNNING)
+        self.registry.update_health(
+            agent_id,
+            healthy=True,
+            accepting_tasks=False,
+            reason="rolling_deploy",
+        )
+
+        handler = self.registry.resolve_target_handler(
+            agent_id,
+            required_capability="summarize",
+        )
+
+        assert handler is None
+        assert self.registry.get(agent_id)["status"] == "running"
+        assert self.registry.routing_audit[-1]["decision"] == "deferred"
+        assert self.registry.routing_audit[-1]["accepting_tasks"] is False
+        assert "config" not in self.registry.routing_audit[-1]
 
 # 2019-01-23T10:28:57 update
 
