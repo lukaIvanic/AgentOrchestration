@@ -9,20 +9,31 @@ class StepStatus(Enum):
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
+    COMPENSATED = "compensated"
+    BLOCKED = "blocked"
     FAILED = "failed"
     SKIPPED = "skipped"
 
 
 class WorkflowStep:
-    def __init__(self, name: str, handler: Callable, retries: int = 0, timeout: int = 300):
+    def __init__(
+        self,
+        name: str,
+        handler: Callable,
+        retries: int = 0,
+        timeout: int = 300,
+        compensation: Optional[Callable] = None,
+    ):
         self.id = str(uuid4())
         self.name = name
         self.handler = handler
+        self.compensation = compensation
         self.retries = retries
         self.timeout = timeout
         self.status = StepStatus.PENDING
         self.result: Any = None
         self.error: Optional[str] = None
+        self.blocked_reason: Optional[str] = None
 
 
 class Workflow:
@@ -33,6 +44,7 @@ class Workflow:
         self.steps: List[WorkflowStep] = []
         self._step_map: Dict[str, WorkflowStep] = {}
         self.status = StepStatus.PENDING
+        self.blocked_reason: Optional[str] = None
 
     def add_step(self, step: WorkflowStep) -> "Workflow":
         self.steps.append(step)
@@ -46,6 +58,7 @@ class Workflow:
 class WorkflowManager:
     def __init__(self):
         self._workflows: Dict[str, Workflow] = {}
+        self._audit_events: List[Dict] = []
 
     def create_workflow(self, name: str, description: str = "") -> Workflow:
         workflow = Workflow(name, description)
@@ -67,20 +80,93 @@ class WorkflowManager:
             return False
 
         workflow.status = StepStatus.RUNNING
-        for step in workflow.steps:
+        completed_steps: List[WorkflowStep] = []
+        for index, step in enumerate(workflow.steps):
             step.status = StepStatus.RUNNING
             try:
                 result = step.handler()
                 step.result = result
                 step.status = StepStatus.COMPLETED
+                completed_steps.append(step)
             except Exception as e:
                 step.error = str(e)
                 step.status = StepStatus.FAILED
                 workflow.status = StepStatus.FAILED
+                self._audit(
+                    "step_failed",
+                    workflow_id=workflow.id,
+                    step_id=step.id,
+                    reason=step.error,
+                )
+                self._compensate_and_block(
+                    workflow,
+                    completed_steps,
+                    failed_step=step,
+                    failed_index=index,
+                )
                 return False
 
         workflow.status = StepStatus.COMPLETED
         return True
+
+    def audit_log(self) -> List[Dict]:
+        return list(self._audit_events)
+
+    def _compensate_and_block(
+        self,
+        workflow: Workflow,
+        completed_steps: List[WorkflowStep],
+        *,
+        failed_step: WorkflowStep,
+        failed_index: int,
+    ) -> None:
+        partial = False
+        for step in reversed(completed_steps):
+            if step.compensation is None:
+                partial = True
+                self._audit(
+                    "compensation_missing",
+                    workflow_id=workflow.id,
+                    step_id=step.id,
+                    reason="no_compensating_action",
+                )
+                continue
+            try:
+                step.compensation()
+                step.status = StepStatus.COMPENSATED
+                self._audit(
+                    "step_compensated",
+                    workflow_id=workflow.id,
+                    step_id=step.id,
+                )
+            except Exception as exc:
+                partial = True
+                step.blocked_reason = str(exc)
+                self._audit(
+                    "compensation_failed",
+                    workflow_id=workflow.id,
+                    step_id=step.id,
+                    reason=str(exc),
+                )
+
+        for step in workflow.steps[failed_index + 1:]:
+            step.status = StepStatus.BLOCKED
+            step.blocked_reason = "upstream_compensation_incomplete"
+
+        workflow.status = StepStatus.BLOCKED if partial else StepStatus.FAILED
+        workflow.blocked_reason = (
+            "partial_rollback_blocks_downstream"
+            if partial else "workflow_failed_after_compensation"
+        )
+        self._audit(
+            "downstream_blocked",
+            workflow_id=workflow.id,
+            failed_step_id=failed_step.id,
+            reason=workflow.blocked_reason,
+        )
+
+    def _audit(self, event: str, **fields) -> None:
+        self._audit_events.append({"event": event, **fields})
 
 # 2019-03-27T19:58:07 update
 
