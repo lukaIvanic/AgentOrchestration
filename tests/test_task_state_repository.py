@@ -108,10 +108,45 @@ def test_task_state_contract_requires_workspace_id_parameter():
         ScopedTaskStateRepository.update,
         ScopedTaskStateRepository.delete,
         ScopedTaskStateRepository.list,
+        ScopedTaskStateRepository.exists,
+        ScopedTaskStateRepository.count_for_workspace,
     ]
     for method in repository_methods:
         signature = inspect.signature(method)
         assert "workspace_id" in signature.parameters
+
+
+def test_scoped_exists_and_count_do_not_cross_workspaces():
+    repository = ScopedTaskStateRepository()
+    repository.save(
+        "workspace-a",
+        "shared-task",
+        {"id": "shared-task"},
+        status="queued",
+    )
+    repository.save(
+        "workspace-b",
+        "shared-task",
+        {"id": "shared-task"},
+        status="queued",
+    )
+    repository.save(
+        "workspace-b",
+        "other-task",
+        {"id": "other-task"},
+        status="queued",
+    )
+
+    assert repository.exists("workspace-a", "shared-task")
+    assert repository.exists("workspace-b", "shared-task")
+    assert not repository.exists("workspace-a", "other-task")
+    assert repository.count_for_workspace("workspace-a") == 1
+    assert repository.count_for_workspace("workspace-b") == 2
+
+    with pytest.raises(TaskStateScopeError):
+        repository.exists("", "shared-task")
+    with pytest.raises(TaskStateScopeError):
+        repository.count_for_workspace("")
 
 
 def test_postgres_rls_policy_scopes_reads_and_writes():
@@ -183,4 +218,27 @@ VALUES (?, ?, ?)
         "unsafe_queries.py",
         "unsafe_queries.py",
         "unsafe_queries.py",
+    ]
+
+
+def test_static_checker_scans_sql_files(tmp_path):
+    unsafe = tmp_path / "unsafe_task_state.sql"
+    unsafe.write_text(
+        "SELECT task_id, status\n"
+        "FROM task_" "state\n"
+        "WHERE task_id = ?;\n",
+        encoding="utf-8",
+    )
+    safe = tmp_path / "safe_task_state.sql"
+    safe.write_text(
+        "SELECT task_id, status\n"
+        "FROM task_" "state\n"
+        "WHERE workspace_id = ? AND task_id = ?;\n",
+        encoding="utf-8",
+    )
+
+    failures = list(unsafe_task_state_queries(tmp_path))
+
+    assert [(path.name, offset) for path, offset in failures] == [
+        ("unsafe_task_state.sql", 0)
     ]

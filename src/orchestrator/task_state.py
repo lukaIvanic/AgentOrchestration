@@ -158,6 +158,14 @@ class ScopedTaskStateRepository:
             states = [state for state in states if state.status == status]
         return [state.clone() for state in states]
 
+    def exists(self, workspace_id: str, task_id: str) -> bool:
+        workspace_id = require_workspace_id(workspace_id)
+        return (workspace_id, task_id) in self._records
+
+    def count_for_workspace(self, workspace_id: str) -> int:
+        workspace_id = require_workspace_id(workspace_id)
+        return sum(1 for scope, _ in self._records if scope == workspace_id)
+
     def get_by_task_id(self, task_id: str) -> Optional[TaskState]:
         raise UnscopedTaskStateAccessError("get_by_task_id")
 
