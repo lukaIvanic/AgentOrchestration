@@ -2,16 +2,31 @@
 
 import json
 import os
-from typing import Any, Dict, List, Optional
+from typing import Dict
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
+
+from src.common.errors import AuthenticationError
 
 
 class OrchestratorClient:
     def __init__(self, base_url: str = None, api_key: str = None):
-        self.base_url = base_url or os.getenv("AO_API_URL", "https://api.agent-orchestrator.io")
-        self.api_key = api_key or os.getenv("AO_API_KEY", "")
+        self.base_url = base_url or os.getenv(
+            "AO_API_URL",
+            "https://api.agent-orchestrator.io",
+        )
+        self.api_key = self._resolve_api_key(api_key)
         self._session = None
+
+    @staticmethod
+    def _resolve_api_key(api_key: str = None) -> str:
+        resolved = api_key if api_key is not None else os.getenv("AO_API_KEY")
+        if not isinstance(resolved, str) or not resolved.strip():
+            raise AuthenticationError(
+                "A non-blank API key string is required. Pass api_key "
+                "or set AO_API_KEY before creating OrchestratorClient."
+            )
+        return resolved.strip()
 
     def _request(self, method: str, path: str, data: Dict = None) -> Dict:
         url = f"{self.base_url}/api/v2{path}"
@@ -28,12 +43,21 @@ class OrchestratorClient:
         except HTTPError as e:
             return {"error": e.code, "message": e.reason}
 
-    def register_agent(self, name: str, agent_type: str, config: Dict = None) -> Dict:
-        return self._request("POST", "/agents", {
-            "name": name,
-            "agent_type": agent_type,
-            "config": config or {},
-        })
+    def register_agent(
+        self,
+        name: str,
+        agent_type: str,
+        config: Dict = None,
+    ) -> Dict:
+        return self._request(
+            "POST",
+            "/agents",
+            {
+                "name": name,
+                "agent_type": agent_type,
+                "config": config or {},
+            },
+        )
 
     def list_agents(self, status: str = None) -> Dict:
         path = "/agents"
