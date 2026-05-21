@@ -2,7 +2,7 @@
 
 import heapq
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 
@@ -20,6 +20,14 @@ class PriorityQueue:
             return heapq.heappop(self._queue)[2]
         return None
 
+    def pop_entry(self) -> Optional[Tuple[int, int, Any]]:
+        if self._queue:
+            return heapq.heappop(self._queue)
+        return None
+
+    def push_entry(self, entry: Tuple[int, int, Any]) -> None:
+        heapq.heappush(self._queue, entry)
+
     def peek(self) -> Optional[Any]:
         if self._queue:
             return self._queue[0][2]
@@ -32,7 +40,7 @@ class PriorityQueue:
 class TaskScheduler:
     def __init__(self):
         self._queues: Dict[str, PriorityQueue] = {}
-        self._scheduled: Dict[str, float] = {}
+        self._scheduled: Dict[str, Dict[str, Any]] = {}
         self._in_flight: Dict[str, Dict] = {}
         self._max_retries = 3
         self._tenant_limits: Dict[str, int] = {}
@@ -67,7 +75,14 @@ class TaskScheduler:
     ) -> str:
         task_id = str(uuid4())
         task["id"] = task_id
-        self._scheduled[task_id] = time.time() + delay
+        task["queue"] = queue
+        task["priority"] = priority
+        self._scheduled[task_id] = {
+            "ready_at": time.time() + delay,
+            "task": task,
+            "queue": queue,
+            "priority": priority,
+        }
         return task_id
 
     async def dequeue(
@@ -76,30 +91,23 @@ class TaskScheduler:
         timeout: float = 1.0,
     ) -> Optional[Dict]:
         now = time.time()
-        expired = [tid for tid, t in self._scheduled.items() if t <= now]
+        expired = [
+            tid
+            for tid, scheduled in self._scheduled.items()
+            if scheduled["ready_at"] <= now
+        ]
         for tid in expired:
-            task = self._scheduled.pop(tid)
-            if task:
-                self.enqueue(task, queue)
+            scheduled = self._scheduled.pop(tid)
+            self.enqueue(
+                scheduled["task"],
+                scheduled["queue"],
+                priority=scheduled["priority"],
+                preserve_id=True,
+            )
 
         if queue in self._queues and len(self._queues[queue]) > 0:
-            task = self._queues[queue].pop()
+            task = self._pop_dispatchable_task(queue)
             if task:
-                tenant_id = str(task.get("tenant_id", "default"))
-                limit = self._tenant_limits.get(tenant_id)
-                active_count = self._active_count_for_tenant(tenant_id)
-                if limit is not None and active_count >= limit:
-                    task["recovery_state"] = "deferred"
-                    self._queues[queue].push(task, task.get("priority", 0))
-                    self._audit_recovery(
-                        "deferred_dispatch",
-                        task["id"],
-                        tenant_id,
-                        active_count,
-                        limit,
-                        queue,
-                    )
-                    return None
                 self._in_flight[task["id"]] = task
                 return task
         return None
@@ -198,6 +206,39 @@ class TaskScheduler:
 
     def _active_count_for_tenant(self, tenant_id: str) -> int:
         return self._active_counts_by_tenant().get(str(tenant_id), 0)
+
+    def _pop_dispatchable_task(self, queue: str) -> Optional[Dict]:
+        deferred_entries = []
+        selected = None
+
+        while len(self._queues[queue]) > 0:
+            entry = self._queues[queue].pop_entry()
+            if entry is None:
+                break
+
+            task = entry[2]
+            tenant_id = str(task.get("tenant_id", "default"))
+            limit = self._tenant_limits.get(tenant_id)
+            active_count = self._active_count_for_tenant(tenant_id)
+            if limit is not None and active_count >= limit:
+                task["recovery_state"] = "deferred"
+                deferred_entries.append(entry)
+                self._audit_recovery(
+                    "deferred_dispatch",
+                    task["id"],
+                    tenant_id,
+                    active_count,
+                    limit,
+                    queue,
+                )
+                continue
+
+            selected = task
+            break
+
+        for entry in deferred_entries:
+            self._queues[queue].push_entry(entry)
+        return selected
 
     def _audit_recovery(
         self,

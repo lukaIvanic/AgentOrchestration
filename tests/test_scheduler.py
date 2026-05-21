@@ -101,6 +101,60 @@ class TestTaskScheduler:
         )
         assert self.scheduler.recovery_audit[-1]["active_count"] == 1
 
+    def test_dequeue_skips_blocked_tenant_and_dispatches_available_work(self):
+        self.scheduler.set_tenant_concurrency_limit("tenant-a", 1)
+        self.scheduler.enqueue(
+            {"id": "active-1", "type": "test", "tenant_id": "tenant-a"},
+            preserve_id=True,
+        )
+        import asyncio
+        active = asyncio.run(self.scheduler.dequeue())
+        assert active["id"] == "active-1"
+
+        self.scheduler.enqueue(
+            {
+                "id": "blocked-1",
+                "type": "blocked",
+                "tenant_id": "tenant-a",
+            },
+            preserve_id=True,
+            priority=10,
+        )
+        self.scheduler.enqueue(
+            {
+                "id": "available-1",
+                "type": "available",
+                "tenant_id": "tenant-b",
+            },
+            preserve_id=True,
+            priority=5,
+        )
+
+        available = asyncio.run(self.scheduler.dequeue())
+
+        assert available["id"] == "available-1"
+        assert "blocked-1" not in self.scheduler._in_flight
+        assert self.scheduler.recovery_audit[-1]["task_id"] == "blocked-1"
+
+        self.scheduler.complete("active-1")
+        blocked = asyncio.run(self.scheduler.dequeue())
+        assert blocked["id"] == "blocked-1"
+
+    def test_schedule_preserves_task_payload_until_ready(self):
+        scheduled_id = self.scheduler.schedule(
+            {"type": "scheduled", "tenant_id": "tenant-a"},
+            delay=0,
+            priority=3,
+        )
+
+        import asyncio
+        scheduled = asyncio.run(self.scheduler.dequeue())
+
+        assert scheduled["id"] == scheduled_id
+        assert scheduled["type"] == "scheduled"
+        assert scheduled["tenant_id"] == "tenant-a"
+        assert scheduled["priority"] == 3
+
     def test_recovery_skips_task_that_is_already_in_flight(self):
         self.scheduler.set_tenant_concurrency_limit("tenant-a", 2)
         self.scheduler.enqueue(
