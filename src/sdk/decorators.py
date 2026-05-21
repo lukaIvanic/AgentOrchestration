@@ -47,11 +47,12 @@ def on_event(event_type: str):
     """Decorator for marking a method as an event handler."""
     if not isinstance(event_type, str):
         raise TypeError("event_type must be a string")
-    if not event_type.strip():
+    event_name = event_type.strip()
+    if not event_name:
         raise ValueError("event_type must be a non-empty string")
 
     def decorator(func: Callable) -> Callable:
-        func.__event_handler__ = event_type
+        func.__event_handler__ = event_name
 
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):

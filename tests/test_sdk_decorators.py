@@ -27,6 +27,14 @@ def test_on_event_marks_handler_with_event_type():
     assert handle_started.__event_handler__ == "agent.started"
 
 
+def test_on_event_strips_surrounding_event_type_whitespace():
+    @on_event("  agent.started  ")
+    async def handle_started():
+        return "ok"
+
+    assert handle_started.__event_handler__ == "agent.started"
+
+
 def test_on_event_preserves_wrapped_handler_behavior():
     seen_payloads = []
 
