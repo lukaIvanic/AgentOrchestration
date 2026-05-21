@@ -1,4 +1,3 @@
-import pytest
 from src.orchestrator.scheduler import TaskScheduler
 
 
@@ -35,6 +34,47 @@ class TestTaskScheduler:
         import asyncio
         task = asyncio.run(self.scheduler.dequeue())
         assert self.scheduler.fail(task["id"])
+
+    def test_recovery_defers_over_tenant_limit_after_restart(self):
+        self.scheduler = TaskScheduler(max_running_per_tenant=1)
+        self.scheduler.enqueue({"type": "long", "tenant_id": "tenant-a"})
+        import asyncio
+        running = asyncio.run(self.scheduler.dequeue())
+
+        decisions = self.scheduler.recover_after_restart([
+            {"id": "recovered-1", "type": "retry", "tenant_id": "tenant-a"}
+        ])
+
+        assert running["tenant_id"] == "tenant-a"
+        assert decisions == [{
+            "task_id": "recovered-1",
+            "tenant_id": "tenant-a",
+            "decision": "deferred",
+            "reason": "tenant_concurrency_limit",
+            "state": "deferred",
+        }]
+        assert self.scheduler.deferred("recovered-1")["state"] == "deferred"
+        assert self.scheduler.deferred("recovered-1")["deferred_reason"] == (
+            "tenant_concurrency_limit"
+        )
+        assert asyncio.run(self.scheduler.dequeue()) is None
+        assert self.scheduler.audit_log()[-1]["event"] == "recovery_deferred"
+        assert "payload" not in self.scheduler.audit_log()[-1]
+
+    def test_recovery_queues_available_tenant_with_audit_metadata(self):
+        self.scheduler = TaskScheduler(max_running_per_tenant=1)
+
+        decisions = self.scheduler.recover_after_restart([
+            {"id": "recovered-2", "type": "retry", "tenant_id": "tenant-b"}
+        ])
+
+        import asyncio
+        task = asyncio.run(self.scheduler.dequeue())
+        assert decisions[0]["decision"] == "queued"
+        assert task["id"] == "recovered-2"
+        assert task["state"] == "running"
+        assert self.scheduler.audit_log()[-1]["event"] == "recovery_queued"
+        assert self.scheduler.audit_log()[-1]["tenant_id"] == "tenant-b"
 
 # 2019-01-09T19:07:03 update
 

@@ -1,9 +1,8 @@
 """Task Scheduler — Priority-based task queuing and dispatch."""
 
-import asyncio
 import heapq
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 
@@ -31,42 +30,87 @@ class PriorityQueue:
 
 
 class TaskScheduler:
-    def __init__(self):
+    def __init__(
+        self,
+        max_running_per_tenant: int = 1,
+        audit_limit: int = 100,
+    ):
         self._queues: Dict[str, PriorityQueue] = {}
-        self._scheduled: Dict[str, float] = {}
+        self._scheduled: Dict[str, Dict] = {}
         self._in_flight: Dict[str, Dict] = {}
+        self._deferred: Dict[str, Dict] = {}
+        self._audit_events: List[Dict] = []
         self._max_retries = 3
+        self._max_running_per_tenant = max_running_per_tenant
+        self._audit_limit = audit_limit
 
-    def enqueue(self, task: Dict, queue: str = "default", priority: int = 0) -> str:
-        task_id = str(uuid4())
+    def enqueue(
+        self,
+        task: Dict,
+        queue: str = "default",
+        priority: int = 0,
+    ) -> str:
+        task_id = task.get("id") or str(uuid4())
         task["id"] = task_id
+        task["queue"] = queue
+        task["priority"] = priority
         task["enqueued_at"] = time.time()
-        task["retries"] = 0
+        task.setdefault("retries", 0)
+        task["state"] = "queued"
 
         if queue not in self._queues:
             self._queues[queue] = PriorityQueue()
         self._queues[queue].push(task, priority)
         return task_id
 
-    def schedule(self, task: Dict, delay: float, queue: str = "default", priority: int = 0) -> str:
-        task_id = str(uuid4())
+    def schedule(
+        self,
+        task: Dict,
+        delay: float,
+        queue: str = "default",
+        priority: int = 0,
+    ) -> str:
+        task_id = task.get("id") or str(uuid4())
         task["id"] = task_id
-        self._scheduled[task_id] = time.time() + delay
+        task["queue"] = queue
+        task["priority"] = priority
+        task["state"] = "scheduled"
+        self._scheduled[task_id] = {
+            "due_at": time.time() + delay,
+            "task": task,
+            "queue": queue,
+            "priority": priority,
+        }
         return task_id
 
-    async def dequeue(self, queue: str = "default", timeout: float = 1.0) -> Optional[Dict]:
+    async def dequeue(
+        self,
+        queue: str = "default",
+        timeout: float = 1.0,
+    ) -> Optional[Dict]:
         now = time.time()
-        expired = [tid for tid, t in self._scheduled.items() if t <= now]
+        expired = [
+            tid
+            for tid, item in self._scheduled.items()
+            if item["due_at"] <= now
+        ]
         for tid in expired:
-            task = self._scheduled.pop(tid)
-            if task:
-                self.enqueue(task, queue)
+            item = self._scheduled.pop(tid)
+            self.enqueue(item["task"], item["queue"], item["priority"])
 
         if queue in self._queues and len(self._queues[queue]) > 0:
-            task = self._queues[queue].pop()
-            if task:
-                self._in_flight[task["id"]] = task
-                return task
+            while len(self._queues[queue]) > 0:
+                task = self._queues[queue].pop()
+                if self._can_start(task):
+                    task["state"] = "running"
+                    task["started_at"] = time.time()
+                    self._in_flight[task["id"]] = task
+                    return task
+                self._defer_task(
+                    task,
+                    reason="tenant_concurrency_limit",
+                    source="dequeue",
+                )
         return None
 
     def complete(self, task_id: str) -> bool:
@@ -80,6 +124,95 @@ class TaskScheduler:
                 self.enqueue(task, queue, priority=task.get("priority", 0))
                 return True
         return False
+
+    def recover_after_restart(
+        self,
+        recovered_tasks: List[Dict],
+        queue: str = "default",
+    ) -> List[Dict]:
+        decisions = []
+        admitted_by_tenant: Dict[str, int] = {}
+        for task in recovered_tasks:
+            tenant_id = self._tenant_for(task)
+            running = self._running_count(tenant_id)
+            admitted = admitted_by_tenant.get(tenant_id, 0)
+            if running + admitted >= self._max_running_per_tenant:
+                self._defer_task(
+                    task,
+                    reason="tenant_concurrency_limit",
+                    source="restart_recovery",
+                )
+                decisions.append(
+                    self._decision(
+                        task,
+                        "deferred",
+                        "tenant_concurrency_limit",
+                    )
+                )
+                continue
+
+            admitted_by_tenant[tenant_id] = admitted + 1
+            self.enqueue(task, queue, priority=task.get("priority", 0))
+            self._audit(
+                "recovery_queued",
+                task_id=task["id"],
+                tenant_id=tenant_id,
+                queue=queue,
+            )
+            decisions.append(
+                self._decision(task, "queued", "capacity_available")
+            )
+        return decisions
+
+    def audit_log(self) -> List[Dict]:
+        return list(self._audit_events)
+
+    def deferred(self, task_id: str) -> Optional[Dict]:
+        return self._deferred.get(task_id)
+
+    def _tenant_for(self, task: Dict) -> str:
+        return task.get("tenant_id") or task.get("tenant") or "default"
+
+    def _running_count(self, tenant_id: str) -> int:
+        return sum(
+            1
+            for task in self._in_flight.values()
+            if self._tenant_for(task) == tenant_id
+        )
+
+    def _can_start(self, task: Dict) -> bool:
+        return (
+            self._running_count(self._tenant_for(task))
+            < self._max_running_per_tenant
+        )
+
+    def _defer_task(self, task: Dict, *, reason: str, source: str) -> None:
+        task["state"] = "deferred"
+        task["deferred_reason"] = reason
+        task["deferred_at"] = time.time()
+        self._deferred[task["id"]] = task
+        self._audit(
+            "recovery_deferred",
+            task_id=task["id"],
+            tenant_id=self._tenant_for(task),
+            reason=reason,
+            source=source,
+        )
+
+    def _decision(self, task: Dict, decision: str, reason: str) -> Dict:
+        return {
+            "task_id": task["id"],
+            "tenant_id": self._tenant_for(task),
+            "decision": decision,
+            "reason": reason,
+            "state": task["state"],
+        }
+
+    def _audit(self, event: str, **fields) -> None:
+        record = {"event": event, "at": time.time(), **fields}
+        self._audit_events.append(record)
+        if len(self._audit_events) > self._audit_limit:
+            self._audit_events = self._audit_events[-self._audit_limit:]
 
 # 2019-04-25T08:37:12 update
 
