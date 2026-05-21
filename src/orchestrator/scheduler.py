@@ -1,10 +1,14 @@
 """Task Scheduler — Priority-based task queuing and dispatch."""
 
-import asyncio
 import heapq
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 from uuid import uuid4
+
+from src.orchestrator.task_state import (
+    ScopedTaskStateRepository,
+    require_workspace_id,
+)
 
 
 class PriorityQueue:
@@ -31,54 +35,158 @@ class PriorityQueue:
 
 
 class TaskScheduler:
-    def __init__(self):
+    def __init__(
+        self,
+        task_state_repository: Optional[ScopedTaskStateRepository] = None,
+    ):
         self._queues: Dict[str, PriorityQueue] = {}
-        self._scheduled: Dict[str, float] = {}
-        self._in_flight: Dict[str, Dict] = {}
+        self._scheduled: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        self._in_flight: Dict[Tuple[str, str], Dict] = {}
+        self.task_state = task_state_repository or ScopedTaskStateRepository()
         self._max_retries = 3
 
-    def enqueue(self, task: Dict, queue: str = "default", priority: int = 0) -> str:
-        task_id = str(uuid4())
+    def _queue_key(self, workspace_id: str, queue: str) -> str:
+        return f"{workspace_id}:{queue}"
+
+    def enqueue(
+        self,
+        task: Dict,
+        *,
+        workspace_id: str,
+        queue: str = "default",
+        priority: int = 0,
+        task_id: Optional[str] = None,
+    ) -> str:
+        workspace_id = require_workspace_id(workspace_id)
+        task_id = task_id or str(uuid4())
         task["id"] = task_id
+        task["workspace_id"] = workspace_id
         task["enqueued_at"] = time.time()
-        task["retries"] = 0
+        task["retries"] = task.get("retries", 0)
+        task["priority"] = priority
 
-        if queue not in self._queues:
-            self._queues[queue] = PriorityQueue()
-        self._queues[queue].push(task, priority)
+        scoped_queue = self._queue_key(workspace_id, queue)
+        if scoped_queue not in self._queues:
+            self._queues[scoped_queue] = PriorityQueue()
+        self._queues[scoped_queue].push(task, priority)
+        self.task_state.save(
+            workspace_id,
+            task_id,
+            task,
+            status="queued",
+            queue=queue,
+            priority=priority,
+            retries=task["retries"],
+        )
         return task_id
 
-    def schedule(self, task: Dict, delay: float, queue: str = "default", priority: int = 0) -> str:
-        task_id = str(uuid4())
+    def schedule(
+        self,
+        task: Dict,
+        delay: float,
+        *,
+        workspace_id: str,
+        queue: str = "default",
+        priority: int = 0,
+        task_id: Optional[str] = None,
+    ) -> str:
+        workspace_id = require_workspace_id(workspace_id)
+        task_id = task_id or str(uuid4())
         task["id"] = task_id
-        self._scheduled[task_id] = time.time() + delay
+        task["workspace_id"] = workspace_id
+        task["retries"] = task.get("retries", 0)
+        task["priority"] = priority
+        self._scheduled[(workspace_id, task_id)] = {
+            "run_at": time.time() + delay,
+            "task": task,
+            "queue": queue,
+            "priority": priority,
+        }
+        self.task_state.save(
+            workspace_id,
+            task_id,
+            task,
+            status="scheduled",
+            queue=queue,
+            priority=priority,
+            retries=task["retries"],
+        )
         return task_id
 
-    async def dequeue(self, queue: str = "default", timeout: float = 1.0) -> Optional[Dict]:
+    async def dequeue(
+        self,
+        *,
+        workspace_id: str,
+        queue: str = "default",
+        timeout: float = 1.0,
+    ) -> Optional[Dict]:
+        workspace_id = require_workspace_id(workspace_id)
         now = time.time()
-        expired = [tid for tid, t in self._scheduled.items() if t <= now]
-        for tid in expired:
-            task = self._scheduled.pop(tid)
-            if task:
-                self.enqueue(task, queue)
+        expired = [
+            key for key, state in self._scheduled.items()
+            if key[0] == workspace_id and state["run_at"] <= now
+        ]
+        for key in expired:
+            scheduled = self._scheduled.pop(key)
+            self.enqueue(
+                scheduled["task"],
+                workspace_id=workspace_id,
+                queue=scheduled["queue"],
+                priority=scheduled["priority"],
+                task_id=key[1],
+            )
 
-        if queue in self._queues and len(self._queues[queue]) > 0:
-            task = self._queues[queue].pop()
+        scoped_queue = self._queue_key(workspace_id, queue)
+        if (
+            scoped_queue in self._queues
+            and len(self._queues[scoped_queue]) > 0
+        ):
+            task = self._queues[scoped_queue].pop()
             if task:
-                self._in_flight[task["id"]] = task
+                self._in_flight[(workspace_id, task["id"])] = task
+                self.task_state.update(
+                    workspace_id,
+                    task["id"],
+                    status="in_flight",
+                    task=task,
+                )
                 return task
         return None
 
-    def complete(self, task_id: str) -> bool:
-        return self._in_flight.pop(task_id, None) is not None
+    def complete(self, task_id: str, *, workspace_id: str) -> bool:
+        workspace_id = require_workspace_id(workspace_id)
+        task = self._in_flight.pop((workspace_id, task_id), None)
+        if not task:
+            return False
+        self.task_state.update(workspace_id, task_id, status="completed")
+        return True
 
-    def fail(self, task_id: str, queue: str = "default") -> bool:
-        task = self._in_flight.pop(task_id, None)
+    def fail(
+        self,
+        task_id: str,
+        *,
+        workspace_id: str,
+        queue: str = "default",
+    ) -> bool:
+        workspace_id = require_workspace_id(workspace_id)
+        task = self._in_flight.pop((workspace_id, task_id), None)
         if task:
             task["retries"] += 1
             if task["retries"] < self._max_retries:
-                self.enqueue(task, queue, priority=task.get("priority", 0))
+                self.enqueue(
+                    task,
+                    workspace_id=workspace_id,
+                    queue=queue,
+                    priority=task.get("priority", 0),
+                    task_id=task_id,
+                )
                 return True
+            self.task_state.update(
+                workspace_id,
+                task_id,
+                status="failed",
+                retries=task["retries"],
+            )
         return False
 
 # 2019-04-25T08:37:12 update
