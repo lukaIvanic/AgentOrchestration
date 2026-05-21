@@ -46,10 +46,18 @@ def evaluate_migration_gate(manifest: Mapping[str, Any]) -> Dict[str, Any]:
     reversible = _release_is_reversible(manifest)
     errors: List[str] = []
     compatibility = []
+    audit_events = []
 
     for index, migration in enumerate(migrations):
         if not isinstance(migration, Mapping):
             errors.append(f"migration {index} must be an object")
+            audit_events.append(
+                _audit_event(
+                    "migration_rejected",
+                    f"migration-{index}",
+                    "invalid migration record",
+                )
+            )
             continue
 
         name = str(
@@ -60,6 +68,17 @@ def evaluate_migration_gate(manifest: Mapping[str, Any]) -> Dict[str, Any]:
         status = _effective_status(name, migration, result_overrides)
         if not _passed(status):
             errors.append(f"{name}: migration status is not successful")
+            audit_events.append(
+                _audit_event(
+                    "migration_rejected",
+                    name,
+                    "migration status is not successful",
+                )
+            )
+        else:
+            audit_events.append(
+                _audit_event("migration_completed", name, "status passed")
+            )
 
         has_compatibility_check = _has_compatibility_check(migration)
         backward_compatible = _is_backward_compatible(migration)
@@ -73,18 +92,53 @@ def evaluate_migration_gate(manifest: Mapping[str, Any]) -> Dict[str, Any]:
 
         if reversible and not has_compatibility_check:
             errors.append(f"{name}: missing backward compatibility check")
+            audit_events.append(
+                _audit_event(
+                    "migration_rejected",
+                    name,
+                    "missing backward compatibility check",
+                )
+            )
         elif reversible and not backward_compatible:
             errors.append(
                 f"{name}: not backward compatible for reversible release"
             )
+            audit_events.append(
+                _audit_event(
+                    "migration_rejected",
+                    name,
+                    "not backward compatible for reversible release",
+                )
+            )
+        elif has_compatibility_check:
+            audit_events.append(
+                _audit_event(
+                    "compatibility_checked",
+                    name,
+                    "backward compatible"
+                    if backward_compatible
+                    else "not backward compatible",
+                )
+            )
 
     traffic_allowed = not errors
+    audit_events.append(
+        {
+            "event": "rollout_decision",
+            "decision": (
+                "allow_traffic" if traffic_allowed else "keep_prior_version"
+            ),
+            "migration_count": len(migrations),
+            "reversible": reversible,
+        }
+    )
     return {
         "traffic_allowed": traffic_allowed,
         "prior_version_serving": not traffic_allowed,
         "reversible": reversible,
         "compatibility": compatibility,
         "errors": errors,
+        "audit_events": audit_events,
     }
 
 
@@ -115,6 +169,18 @@ def build_migration_summary(result: Mapping[str, Any]) -> str:
         lines.append("Blocked rollout:")
         lines.extend(f"- {error}" for error in errors)
     return "\n".join(lines)
+
+
+def _audit_event(
+    event: str,
+    migration_name: str,
+    reason: str,
+) -> Dict[str, Any]:
+    return {
+        "event": event,
+        "migration": migration_name,
+        "reason": reason,
+    }
 
 
 def _migration_entries(manifest: Mapping[str, Any]) -> List[Any]:

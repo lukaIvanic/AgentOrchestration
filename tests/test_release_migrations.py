@@ -34,6 +34,12 @@ def test_completed_compatible_migrations_allow_traffic():
             "checked": True,
         }
     ]
+    assert {
+        "event": "rollout_decision",
+        "decision": "allow_traffic",
+        "migration_count": 1,
+        "reversible": True,
+    } in result["audit_events"]
 
 
 def test_failed_migration_blocks_rollout_and_keeps_prior_version():
@@ -57,6 +63,17 @@ def test_failed_migration_blocks_rollout_and_keeps_prior_version():
         in result["errors"]
     )
     assert "Prior version serving: yes" in build_migration_summary(result)
+    assert {
+        "event": "migration_rejected",
+        "migration": "002_backfill_state",
+        "reason": "migration status is not successful",
+    } in result["audit_events"]
+    assert {
+        "event": "rollout_decision",
+        "decision": "keep_prior_version",
+        "migration_count": 1,
+        "reversible": True,
+    } in result["audit_events"]
 
 
 def test_reversible_release_requires_compatibility_check():
@@ -74,6 +91,11 @@ def test_reversible_release_requires_compatibility_check():
         "003_drop_legacy_column: missing backward compatibility check"
         in result["errors"]
     )
+    assert {
+        "event": "migration_rejected",
+        "migration": "003_drop_legacy_column",
+        "reason": "missing backward compatibility check",
+    } in result["audit_events"]
 
 
 def test_reversible_release_blocks_non_compatible_migration():
