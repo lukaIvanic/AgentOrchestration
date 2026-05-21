@@ -48,6 +48,87 @@ class TestAgentRegistry:
     def test_delete_nonexistent_agent(self):
         assert not self.registry.delete("nonexistent-id")
 
+    def test_resolve_capability_alias_case_insensitively(self):
+        agent_id = self.registry.register(
+            "test-agent",
+            "worker.processor",
+            {"capability_aliases": ["Summarize.Text"]},
+        )
+        self.registry.update_status(agent_id, AgentStatus.RUNNING)
+
+        agent = self.registry.resolve_capability_alias("summarize.text")
+
+        assert agent is not None
+        assert agent["id"] == agent_id
+
+    def test_duplicate_alias_registration_is_rejected_case_insensitively(self):
+        self.registry.register(
+            "test-agent",
+            "worker.processor",
+            {"capability_aliases": ["Summarize.Text"]},
+        )
+
+        with pytest.raises(ValueError):
+            self.registry.register(
+                "duplicate-agent",
+                "worker.analyzer",
+                {"capability_aliases": ["summarize.text"]},
+            )
+
+        assert self.registry.count() == 1
+        assert self.registry.audit_events()[-1]["event"] == "alias_rejected"
+
+    def test_duplicate_aliases_within_agent_are_rejected(self):
+        with pytest.raises(ValueError):
+            self.registry.register(
+                "test-agent",
+                "worker.processor",
+                {"capability_aliases": ["Summarize.Text", " summarize.text "]},
+            )
+
+        assert self.registry.count() == 0
+
+    def test_alias_resolution_defers_unavailable_agent_and_preserves_state(
+        self,
+    ):
+        agent_id = self.registry.register(
+            "test-agent",
+            "worker.processor",
+            {"capability_aliases": ["Summarize.Text"]},
+        )
+        self.registry.update_status(agent_id, AgentStatus.RUNNING)
+        assert (
+            self.registry.resolve_capability_alias("SUMMARIZE.TEXT")["id"]
+            == agent_id
+        )
+
+        self.registry.update_status(agent_id, AgentStatus.STOPPED)
+        agent = self.registry.resolve_capability_alias("summarize.text")
+
+        assert agent is None
+        assert self.registry.get(agent_id)["status"] == "stopped"
+        assert self.registry.audit_events()[-1]["event"] == "alias_deferred"
+
+    def test_alias_is_reusable_after_terminal_agent_delete(self):
+        agent_id = self.registry.register(
+            "old-agent",
+            "worker.processor",
+            {"capability_aliases": ["Summarize.Text"]},
+        )
+        assert self.registry.delete(agent_id)
+
+        replacement_id = self.registry.register(
+            "new-agent",
+            "worker.processor",
+            {"capability_aliases": ["summarize.text"]},
+        )
+        self.registry.update_status(replacement_id, AgentStatus.RUNNING)
+
+        assert (
+            self.registry.resolve_capability_alias("SUMMARIZE.TEXT")["id"]
+            == replacement_id
+        )
+
 # 2019-01-23T10:28:57 update
 
 # 2019-01-28T18:15:57 update

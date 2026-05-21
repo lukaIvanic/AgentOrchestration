@@ -1,10 +1,9 @@
 """Agent Registry — Manages agent lifecycle and metadata."""
 
-import json
 import time
 import uuid
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 
 class AgentStatus(Enum):
@@ -17,12 +16,29 @@ class AgentStatus(Enum):
 
 
 class AgentRegistry:
+    TERMINAL_STATUSES = {
+        AgentStatus.STOPPED.value,
+        AgentStatus.FAILED.value,
+        AgentStatus.TERMINATED.value,
+    }
+
     def __init__(self, storage_backend: str = "memory"):
         self.storage_backend = storage_backend
         self._agents: Dict[str, Dict[str, Any]] = {}
         self._index: Dict[str, List[str]] = {}
+        self._alias_index: Dict[str, str] = {}
+        self._alias_cache: Dict[str, Optional[str]] = {}
+        self._audit_events: List[Dict[str, Any]] = []
 
-    def register(self, name: str, agent_type: str, config: Optional[Dict] = None) -> str:
+    def register(
+        self,
+        name: str,
+        agent_type: str,
+        config: Optional[Dict] = None,
+    ) -> str:
+        config = dict(config or {})
+        aliases = self._normalize_aliases(config.get("capability_aliases", []))
+        self._ensure_aliases_available(aliases)
         agent_id = str(uuid.uuid4())
         timestamp = time.time()
         self._agents[agent_id] = {
@@ -30,7 +46,8 @@ class AgentRegistry:
             "name": name,
             "type": agent_type,
             "status": AgentStatus.PENDING.value,
-            "config": config or {},
+            "config": config,
+            "capability_aliases": sorted(aliases),
             "created_at": timestamp,
             "updated_at": timestamp,
             "version": "1.0.0",
@@ -40,12 +57,25 @@ class AgentRegistry:
         if group not in self._index:
             self._index[group] = []
         self._index[group].append(agent_id)
+        for alias in aliases:
+            self._alias_index[alias] = agent_id
+            self._alias_cache.pop(alias, None)
+        if aliases:
+            self._audit(
+                "aliases_registered",
+                agent_id,
+                aliases=sorted(aliases),
+            )
         return agent_id
 
     def get(self, agent_id: str) -> Optional[Dict[str, Any]]:
         return self._agents.get(agent_id)
 
-    def list(self, status: Optional[AgentStatus] = None, group: Optional[str] = None) -> List[Dict[str, Any]]:
+    def list(
+        self,
+        status: Optional[AgentStatus] = None,
+        group: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         agents = self._agents.values()
         if status:
             agents = [a for a in agents if a["status"] == status.value]
@@ -59,6 +89,8 @@ class AgentRegistry:
             return False
         self._agents[agent_id]["status"] = status.value
         self._agents[agent_id]["updated_at"] = time.time()
+        self._invalidate_alias_cache(agent_id)
+        self._audit("status_changed", agent_id, status=status.value)
         return True
 
     def delete(self, agent_id: str) -> bool:
@@ -68,10 +100,98 @@ class AgentRegistry:
         group = agent["type"].split(".")[0]
         if group in self._index and agent_id in self._index[group]:
             self._index[group].remove(agent_id)
+        for alias in agent.get("capability_aliases", []):
+            if self._alias_index.get(alias) == agent_id:
+                self._alias_index.pop(alias, None)
+            self._alias_cache.pop(alias, None)
+        self._audit("agent_deleted", agent_id)
         return True
 
     def count(self) -> int:
         return len(self._agents)
+
+    def resolve_capability_alias(self, alias: str) -> Optional[Dict[str, Any]]:
+        normalized = self._normalize_alias(alias)
+        if normalized in self._alias_cache:
+            agent_id = self._alias_cache[normalized]
+        else:
+            agent_id = self._alias_index.get(normalized)
+            self._alias_cache[normalized] = agent_id
+
+        if not agent_id:
+            self._audit("alias_missing", None, alias=normalized)
+            return None
+
+        agent = self._agents.get(agent_id)
+        if not agent:
+            self._alias_cache.pop(normalized, None)
+            self._audit("alias_stale", agent_id, alias=normalized)
+            return None
+
+        if agent["status"] != AgentStatus.RUNNING.value:
+            self._audit(
+                "alias_deferred",
+                agent_id,
+                alias=normalized,
+                status=agent["status"],
+            )
+            return None
+
+        self._audit("alias_resolved", agent_id, alias=normalized)
+        return agent
+
+    def audit_events(self) -> List[Dict[str, Any]]:
+        return list(self._audit_events)
+
+    def _ensure_aliases_available(self, aliases: Set[str]) -> None:
+        for alias in aliases:
+            existing_id = self._alias_index.get(alias)
+            if not existing_id:
+                continue
+            existing = self._agents.get(existing_id)
+            if existing and existing["status"] not in self.TERMINAL_STATUSES:
+                self._audit(
+                    "alias_rejected",
+                    existing_id,
+                    alias=alias,
+                    status=existing["status"],
+                )
+                raise ValueError(
+                    f"Capability alias already registered: {alias}"
+                )
+
+    def _normalize_aliases(self, aliases: List[str]) -> Set[str]:
+        normalized = [self._normalize_alias(alias) for alias in aliases]
+        clean_aliases = [alias for alias in normalized if alias]
+        if len(clean_aliases) != len(set(clean_aliases)):
+            self._audit("alias_rejected", None, reason="duplicate")
+            raise ValueError("Duplicate capability aliases are not allowed")
+        return set(clean_aliases)
+
+    def _normalize_alias(self, alias: str) -> str:
+        return str(alias).strip().casefold()
+
+    def _invalidate_alias_cache(self, agent_id: str) -> None:
+        agent = self._agents.get(agent_id)
+        if not agent:
+            return
+        for alias in agent.get("capability_aliases", []):
+            self._alias_cache.pop(alias, None)
+
+    def _audit(
+        self,
+        event: str,
+        agent_id: Optional[str],
+        **metadata: Any,
+    ) -> None:
+        self._audit_events.append(
+            {
+                "event": event,
+                "agent_id": agent_id,
+                "metadata": metadata,
+                "timestamp": time.time(),
+            }
+        )
 
 # 2019-01-29T11:24:49 update
 
