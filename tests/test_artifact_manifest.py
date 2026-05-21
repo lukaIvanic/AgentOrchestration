@@ -66,17 +66,23 @@ def test_quarantined_blob_is_blocked_before_cache_reuse(tmp_path):
     blob = tmp_path / "blob.bin"
     blob.write_bytes(b"tampered artifact")
     manifest_path = write_manifest(tmp_path, "sha256:" + "0" * 64)
+    alerts = []
     quarantine_store = QuarantineStore()
     reader = ArtifactManifestReader(
         tmp_path,
+        alert_sink=alerts.append,
         quarantine_store=quarantine_store,
     )
 
     with pytest.raises(ArtifactIntegrityError):
         reader.read(manifest_path)
 
-    with pytest.raises(QuarantinedArtifactError):
+    with pytest.raises(QuarantinedArtifactError) as exc_info:
         reader.read(manifest_path)
+
+    assert len(alerts) == 2
+    assert alerts[1].alert_type == "artifact_digest_mismatch"
+    assert exc_info.value.alert == alerts[0]
 
 
 def test_persistent_quarantine_marker_blocks_new_reader_instance(tmp_path):
@@ -104,14 +110,19 @@ def test_persistent_quarantine_marker_blocks_new_reader_instance(tmp_path):
         encoding="utf-8",
     )
     blob.write_bytes(b"replacement artifact")
+    alerts = []
     new_reader = ArtifactManifestReader(
         tmp_path,
+        alert_sink=alerts.append,
         quarantine_marker_dir=marker_dir,
     )
 
-    with pytest.raises(QuarantinedArtifactError):
+    with pytest.raises(QuarantinedArtifactError) as exc_info:
         new_reader.read(manifest_path)
 
+    assert len(alerts) == 1
+    assert alerts[0].alert_type == "artifact_digest_mismatch"
+    assert exc_info.value.alert == alerts[0]
     markers = list(marker_dir.glob("*.json"))
     assert len(markers) == 1
     marker = json.loads(markers[0].read_text(encoding="utf-8"))

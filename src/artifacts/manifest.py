@@ -38,9 +38,14 @@ class ArtifactIntegrityError(Exception):
 
 
 class QuarantinedArtifactError(Exception):
-    def __init__(self, blob_path: Path):
+    def __init__(
+        self,
+        blob_path: Path,
+        alert: Optional[IntegrityAlert] = None,
+    ):
         super().__init__(f"Artifact blob is quarantined: {blob_path}")
         self.blob_path = blob_path
+        self.alert = alert
 
 
 class QuarantineStore:
@@ -118,7 +123,10 @@ class ArtifactManifestReader:
         )
 
         if self.quarantine_store.is_quarantined(blob_path):
-            raise QuarantinedArtifactError(blob_path)
+            alert = self.quarantine_store.alert_for(blob_path)
+            if alert is not None:
+                self.alert_sink(alert)
+            raise QuarantinedArtifactError(blob_path, alert)
 
         content = blob_path.read_bytes()
         expected_digest = self._normalize_digest(manifest["digest"])
