@@ -17,6 +17,10 @@ class RunEventStreamError(ValueError):
 class RunEventUnauthorizedError(RunEventStreamError):
     status_code = 403
 
+    def __init__(self, message: str, status_code: int = 403):
+        super().__init__(message)
+        self.status_code = status_code
+
 
 class RunEventPaginationError(RunEventStreamError):
     status_code = 400
@@ -109,7 +113,14 @@ class RunEventStreamService:
     def _authorize(self, authorization: str, tenant_id: str) -> None:
         if not authorization.startswith("Bearer "):
             raise RunEventUnauthorizedError(
-                "authorization bearer token is required"
+                "authorization bearer token is required",
+                status_code=401,
+            )
+        token = authorization.removeprefix("Bearer ").strip()
+        if not token:
+            raise RunEventUnauthorizedError(
+                "authorization bearer token is required",
+                status_code=401,
             )
         expected = f"Bearer tenant:{tenant_id}"
         if authorization != expected:

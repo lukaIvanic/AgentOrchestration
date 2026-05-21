@@ -88,7 +88,10 @@ def test_run_events_reject_blank_bearer_before_lookup():
         headers={"Authorization": "Bearer "},
     )
 
-    assert response.status_code == 403
+    assert response.status_code == 401
+    assert (
+        response.json()["detail"] == "authorization bearer token is required"
+    )
     assert service.store.lookup_count == 0
 
 
@@ -208,6 +211,18 @@ def test_run_events_reject_non_integer_offset_before_lookup():
 
     response = client.get(
         "/api/v2/runs/run-1/events?tenant_id=tenant-a&offset=abc&limit=1",
+        headers={"Authorization": "Bearer tenant:tenant-a"},
+    )
+
+    assert response.status_code == 422
+    assert service.store.lookup_count == 0
+
+
+def test_run_events_reject_non_integer_limit_before_lookup():
+    client, service = make_client()
+
+    response = client.get(
+        "/api/v2/runs/run-1/events?tenant_id=tenant-a&cursor=0&limit=abc",
         headers={"Authorization": "Bearer tenant:tenant-a"},
     )
 
