@@ -29,6 +29,7 @@ class RunEventPaginationError(RunEventStreamError):
 @dataclass(frozen=True)
 class RunEventPage:
     run_id: str
+    workspace_id: str
     tenant_id: str
     cursor: int
     limit: int
@@ -38,26 +39,28 @@ class RunEventPage:
 
 class InMemoryRunEventStore:
     def __init__(self):
-        self._events: Dict[Tuple[str, str], List[Dict]] = {}
+        self._events: Dict[Tuple[str, str, str], List[Dict]] = {}
         self.lookup_count = 0
 
     def replace_events(
         self,
+        workspace_id: str,
         tenant_id: str,
         run_id: str,
         events: List[Dict],
     ) -> None:
-        self._events[(tenant_id, run_id)] = list(events)
+        self._events[(workspace_id, tenant_id, run_id)] = list(events)
 
     def list_events(
         self,
+        workspace_id: str,
         tenant_id: str,
         run_id: str,
         cursor: int,
         limit: int,
     ) -> List[Dict]:
         self.lookup_count += 1
-        events = self._events.get((tenant_id, run_id), [])
+        events = self._events.get((workspace_id, tenant_id, run_id), [])
         return events[cursor:cursor + limit]
 
 
@@ -68,15 +71,30 @@ class RunEventStreamService:
     def list_run_events(
         self,
         authorization: str,
+        workspace_id: str,
         tenant_id: str,
         run_id: str,
         cursor: int = 0,
         limit: int = 50,
     ) -> RunEventPage:
-        self._validate_request(authorization, tenant_id, run_id, cursor, limit)
-        events = self.store.list_events(tenant_id, run_id, cursor, limit)
+        self._validate_request(
+            authorization,
+            workspace_id,
+            tenant_id,
+            run_id,
+            cursor,
+            limit,
+        )
+        events = self.store.list_events(
+            workspace_id,
+            tenant_id,
+            run_id,
+            cursor,
+            limit,
+        )
         return RunEventPage(
             run_id=run_id,
+            workspace_id=workspace_id,
             tenant_id=tenant_id,
             cursor=cursor,
             limit=limit,
@@ -87,6 +105,7 @@ class RunEventStreamService:
     def _validate_request(
         self,
         authorization: str,
+        workspace_id: str,
         tenant_id: str,
         run_id: str,
         cursor: int,
@@ -97,6 +116,8 @@ class RunEventStreamService:
         if not run_id or not run_id.strip():
             raise RunEventPaginationError("run_id is required")
         self._authorize(authorization, tenant_id)
+        if not workspace_id or not workspace_id.strip():
+            raise RunEventPaginationError("workspace_id is required")
         if cursor < 0:
             raise RunEventPaginationError("cursor must be non-negative")
         if limit < 1:

@@ -76,6 +76,7 @@ async def list_run_events(
     offset: Optional[int] = None,
     limit: int = 50,
     authorization: str = Header(default=""),
+    x_workspace_id: str = Header(default=""),
 ):
     if cursor is not None and offset is not None and cursor != offset:
         raise HTTPException(
@@ -89,6 +90,7 @@ async def list_run_events(
     try:
         page = event_stream_service.list_run_events(
             authorization=authorization,
+            workspace_id=x_workspace_id,
             tenant_id=tenant_id,
             run_id=run_id,
             cursor=effective_cursor,
@@ -106,6 +108,7 @@ async def list_run_events(
         ) from exc
     return {
         "run_id": page.run_id,
+        "workspace_id": page.workspace_id,
         "tenant_id": page.tenant_id,
         "cursor": page.cursor,
         "offset": page.cursor,
